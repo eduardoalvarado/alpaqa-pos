@@ -7,6 +7,21 @@ venta al mostrador y un "para llevar" son, en el fondo, la misma transacción. E
 es **un solo producto** que cada negocio configura según cómo opera —no dos productos
 distintos para tienda y restaurante.
 
+> **Este repo es el hub de especificación del proyecto**, no el código. Contiene el PRD
+> maestro, los PRDs por dominio y las referencias de diseño. El código vive en dos repos
+> hermanos.
+
+## Organización del proyecto (topología de repos)
+
+| Repo | Rol |
+|---|---|
+| **`alpaqa-pos`** (este) | Hub de especificación: PRD maestro, PRDs por dominio, `ui/` de diseño. |
+| `alpaqa-pos-backend` | API única que sirve a las tres superficies. El contrato central. |
+| `alpaqa-pos-frontend` | Monorepo de las tres superficies: `apps/pos`, `apps/gestion`, `apps/backoffice` + `packages/` compartidos (design system, api-client, shared). |
+
+Los tres son repos independientes (hermanos en el directorio `Projects/`). Los docs
+compartidos viven aquí porque no pertenecen a backend ni frontend en exclusiva.
+
 ## Fuente de la verdad
 
 El alcance, la visión y las decisiones transversales viven en el PRD:
