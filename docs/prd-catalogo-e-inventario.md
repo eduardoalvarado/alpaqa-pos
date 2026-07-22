@@ -77,7 +77,9 @@ float (lineamientos §2.1); cantidades de stock en `numeric` decimal.
 | nombre | text | |
 | activo | boolean | **borrado lógico** (no romper productos) |
 
-- Unicidad: `(empresa_id, nombre)`. Desactivar no borra; productos existentes conservan la FK.
+- Unicidad: `(empresa_id, nombre)` **global (incluye desactivadas)**. Al intentar crear una que
+  existe desactivada, se ofrece **reactivarla** (evita duplicados fantasma). Desactivar no
+  borra; productos existentes conservan la FK.
 
 **`Producto`**
 | Campo | Tipo | Notas |
@@ -167,7 +169,8 @@ float (lineamientos §2.1); cantidades de stock en `numeric` decimal.
 ### 3.3 Enums
 
 `TipoAfectacionIgv {GRAVADO, EXONERADO, INAFECTO}` · `UnidadMedida {UNIDAD, KG, G, L, ML, M}`
-(extensible) · `TipoMovimiento {VENTA, COMPRA, AJUSTE, DEVOLUCION}`.
+(**enum fijo en MVP**; sin unidades personalizadas por empresa — se amplía con migración si
+falta alguna, preservando consistencia para reportes/IA) · `TipoMovimiento {VENTA, COMPRA, AJUSTE, DEVOLUCION}`.
 
 ### 3.4 Índices clave
 
@@ -193,8 +196,9 @@ float (lineamientos §2.1); cantidades de stock en `numeric` decimal.
 
 1. **Todo producto tiene ≥1 variante.** Crear producto simple crea, transaccionalmente, la
    variante `es_default=true` con su SKU (HU-CAT-02).
-2. **SKU único por empresa**, inmutable como identidad de la unidad de stock una vez con
-   movimientos (editable solo mientras no tenga historial — a confirmar, §8).
+2. **SKU único por empresa**, editable mientras la variante no tenga movimientos;
+   **inmutable una vez con historial** (protege trazabilidad de inventario/ventas e importación
+   CSV, que usa `(empresa_id, sku)` como llave).
 3. **Precio nunca se lee crudo** — siempre vía `PriceResolver`.
 4. **Motivo obligatorio** en todo `MovimientoInventario`.
 5. **Movimiento + stock = una transacción.**
@@ -240,8 +244,9 @@ Superficie: todo lo de escritura vive en **Gestión** (RBAC dueño/admin). El **
 
 - **Variante por defecto explícita** (`es_default`), no implícita: el form «producto simple»
   oculta la complejidad; el modelo siempre tiene la variante como raíz de SKU/stock.
-- **SKU autogenerado y editable**: se propone uno al crear (evita fricción), el usuario puede
-  sobreescribir; unicidad por empresa validada en el borde y en BD.
+- **SKU autogenerado por secuencia por empresa** (correlativo, p. ej. `SKU-000123`), editable
+  al crear para evitar fricción; unicidad por empresa validada en el borde y en BD. **Inmutable
+  una vez que la variante tiene movimientos** (ver invariante §4.2.2).
 - **Ejes normalizados** (no JSON) por integridad y querabilidad; **descriptivos en JSON** por
   flexibilidad. Es la línea que traza PRD §5.
 - **`Stock.cantidad` autoritativo + ledger de movimientos**: no se recalcula el stock leyendo
@@ -267,19 +272,17 @@ Superficie: todo lo de escritura vive en **Gestión** (RBAC dueño/admin). El **
 
 ---
 
-## 8. Pendientes de decisión del dominio
+## 8. Decisiones del dominio cerradas (2026-07-21)
 
-- **Mutabilidad del SKU** una vez que la variante tiene movimientos (propuesta: inmutable con
-  historial; confirmar).
-- **Escala exacta de `numeric`** para precio unitario vs. importe (propuesta: `numeric(12,4)`
-  para soportar precio por unidad de medida en venta por peso).
-- **Unicidad de nombre de categoría**: ¿global o solo entre activas? (propuesta: `(empresa_id,
-  nombre)` global; reactivar en vez de duplicar).
-- **Set inicial de `UnidadMedida`** y si se permite unidad personalizada por empresa (propuesta:
-  enum fijo en MVP).
-- **Estrategia de autogeneración de SKU** (secuencia vs. slug de nombre).
+| Tema | Decisión |
+|---|---|
+| **Mutabilidad del SKU** | **Editable mientras no haya movimientos; inmutable con historial.** Protege trazabilidad e importación CSV (llave `(empresa_id, sku)`). |
+| **Escala de `numeric`** | **`numeric(12,4)`** para precio unitario e importes (soporta precio por unidad de medida en venta por peso). |
+| **Unicidad de nombre de categoría** | **`(empresa_id, nombre)` global** (incluye desactivadas); si existe desactivada, se **reactiva** en vez de duplicar. |
+| **Autogeneración de SKU** | **Secuencia por empresa** (correlativo tipo `SKU-000123`), editable al crear; sin colisiones ni normalización de texto. |
+| **`UnidadMedida`** | **Enum fijo en MVP** (`UNIDAD, KG, G, L, ML, M`); sin unidades personalizadas por empresa. Se amplía con migración. |
 
-Estos no bloquean el arranque; se cierran al escribir el esquema Prisma / primeras HUs.
+No quedan pendientes de decisión abiertos en este dominio.
 
 ---
 
