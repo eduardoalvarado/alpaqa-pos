@@ -82,9 +82,18 @@ Como las tres superficies consumen el mismo backend, **el diseño de la API y el
 - Una empresa tiene 1+ sucursales, cada una con inventario y caja propios.
 
 ### Usuarios y roles
-- Roles: dueño, administrador, cajero, mesero, cocina.
-- **Permisos granulares por rol**: quién aplica descuentos (y hasta qué %), quién autoriza anulaciones, quién ve totales de venta, quién cierra caja.
-- El rol también determina a qué superficie puede acceder el usuario.
+- **Decisión — autorización por permiso, no por nombre de rol.** El código conoce un
+  **vocabulario fijo de permisos** (`vender`, `aplicar_descuento`, `anular_venta`,
+  `cerrar_caja`, `ver_totales`, `gestionar_catalogo`, `ajustar_inventario`,
+  `gestionar_usuarios`, `acceso_pos`, `acceso_gestion`…) y **solo verifica permisos**. Los
+  **roles son datos por-empresa** (`Rol` — nombre + conjunto de permisos, ver modelo de
+  datos) que **cada negocio define**: son configurables, no un enum en el código. Esto
+  mantiene el sistema **rubro-agnóstico** (coherente con el modelo unificado de orden): una
+  bodega crea "vendedor/almacenero", un restaurante "mesero/cocina", sin ramas por rubro.
+- Los roles listados (dueño, administrador, cajero, mesero, cocina) son **ejemplos/semilla**,
+  no la lista cerrada.
+- **Permisos granulares por rol**: quién aplica descuentos (y hasta qué %), quién autoriza anulaciones, quién ve totales de venta, quién cierra caja. (El límite `descuento_max_pct` es un atributo del rol; los permisos booleanos son el vocabulario que verifican los guards.)
+- El rol también determina a qué superficie puede acceder el usuario (vía permisos `acceso_*`).
 
 ### Catálogo
 - Productos, categorías, variantes, modificadores (grupos de modificadores para restaurante).
