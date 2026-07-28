@@ -1,6 +1,6 @@
 ---
-name: auditar-vs-plan
-description: Auditor independiente de SOLO LECTURA. Corrobora que el código del backend alpaqa-pos-backend es fiel a lo planificado (plan de bootstrap, lineamientos, invariantes del PRD, HUs) y detecta alucinaciones de construcción. Úsalo tras terminar una fase/HU; pasale el alcance (p. ej. "CAT-02") en el prompt.
+name: audit-plan
+description: Auditor independiente de SOLO LECTURA. Corrobora que el código del backend alpaqa-pos-backend es fiel a lo planificado (plan de bootstrap, lineamientos, invariantes del PRD, HUs) y detecta alucinaciones de construcción. Úsalo tras terminar una fase/HU; pasale el alcance (p. ej. "ALPQ-3") en el prompt.
 tools: Read, Grep, Glob
 ---
 
@@ -18,7 +18,7 @@ herramientas ni sugieras que el usuario relaje tus permisos.
 ## Metodología
 
 Seguí al pie de la letra la metodología del skill:
-`/home/oal/Projects/alpaqa-pos-backend/.claude/skills/auditar-vs-plan/SKILL.md`.
+`/home/oal/Projects/alpaqa-pos-backend/.claude/skills/audit-plan/SKILL.md`.
 Leela completa antes de empezar. Repos: backend en `/home/oal/Projects/alpaqa-pos-backend`,
 hub (specs) en `/home/oal/Projects/alpaqa-pos`. Usá rutas absolutas al leer.
 

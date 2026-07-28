@@ -50,7 +50,7 @@ Salvo indicación, la superficie es **Gestión** (2.2). El POS (2.3) solo **cons
 
 ---
 
-## HU-CAT-01 — Gestionar categorías
+## HU-ALPQ-2 — Gestionar categorías
 
 **Como** dueño/administrador **quiero** crear, editar y desactivar categorías **para**
 organizar mi catálogo.
@@ -84,7 +84,7 @@ pensada para móvil, PRD §2.2).
 
 ---
 
-## HU-CAT-02 — Crear producto simple (con variante por defecto)
+## HU-ALPQ-3 — Crear producto simple (con variante por defecto)
 
 **Como** dueño **quiero** dar de alta un producto sin variaciones **para** empezar a
 venderlo, sin lidiar con complejidad de variantes.
@@ -108,13 +108,13 @@ Escenario: SKU único por empresa
 creación transaccional de `Variante` por defecto con SKU. Unicidad SKU por empresa. Precio
 se escribe crudo pero **toda lectura pasa por `PriceResolver`**. Dinero vía `Money`.
 **Frontend** — Gestión: form "producto simple" que oculta la complejidad de variantes.
-**Dependencias** — HU-CAT-01.
+**Dependencias** — HU-ALPQ-2.
 **Ref PRD** — §4 (variante por defecto), §5 `Producto`/`Variante`, §6.A (snapshot en venta),
 §9.bis (PriceResolver, Money), §11 (patrón variante-por-defecto).
 
 ---
 
-## HU-CAT-03 — Producto con variantes por ejes (talla/color → múltiples SKU)
+## HU-ALPQ-4 — Producto con variantes por ejes (talla/color → múltiples SKU)
 
 **Como** dueño de tienda **quiero** definir ejes de variante (talla, color) **para** que cada
 combinación sea una unidad de stock con su propio SKU y código de barras.
@@ -137,12 +137,12 @@ Escenario: Stock independiente por variante
 precio por variante (lectura vía `PriceResolver`). `Stock` por variante+sucursal.
 **Frontend** — Gestión: editor de ejes + grilla de variantes generadas (activar/desactivar,
 precio y código por fila).
-**Dependencias** — HU-CAT-02.
+**Dependencias** — HU-ALPQ-3.
 **Ref PRD** — §4 (ejes de variante), §5 `Variante`/`Stock`.
 
 ---
 
-## HU-CAT-04 — Atributos descriptivos opcionales del producto
+## HU-ALPQ-5 — Atributos descriptivos opcionales del producto
 
 **Como** dueño **quiero** registrar atributos descriptivos (peso, medidas, material, marca)
 **para** enriquecer el producto **sin** que generen variantes.
@@ -159,12 +159,12 @@ Escenario: Agregar atributos descriptivos
 **Backend** — `atributos_opcionales` como **JSON flexible** en `Producto` (decisión MVP,
 PRD §11). Validación laxa; clave-valor.
 **Frontend** — Gestión: sección "atributos" con pares clave-valor libres.
-**Dependencias** — HU-CAT-02.
+**Dependencias** — HU-ALPQ-3.
 **Ref PRD** — §4, §5 (nota de modelado ejes vs. descriptivos), §11.
 
 ---
 
-## HU-CAT-05 — Configurar afectación de IGV e ICBPER por producto
+## HU-ALPQ-6 — Configurar afectación de IGV e ICBPER por producto
 
 **Como** dueño **quiero** marcar el tratamiento tributario de cada producto **para** que la
 facturación desglose el IGV correctamente y consigne el ICBPER en bolsas.
@@ -185,12 +185,12 @@ Escenario: Marcar bolsa como afecta a ICBPER
 **snapshotea** en `OrdenItem` al vender (no se lee vivo). No implementa cálculo de comprobante
 (Facturación).
 **Frontend** — Gestión: selector de afectación + toggle ICBPER en el form de producto.
-**Dependencias** — HU-CAT-02.
+**Dependencias** — HU-ALPQ-3.
 **Ref PRD** — §4 (IGV/ICBPER), §6.A (snapshot), §8 (manejo de IGV).
 
 ---
 
-## HU-CAT-06 — Unidad de medida y cantidad fraccionada
+## HU-ALPQ-7 — Unidad de medida y cantidad fraccionada
 
 **Como** dueño **quiero** definir cómo se vende cada producto (unidad, kg, l…) y si admite
 decimales **para** vender a granel/por peso correctamente.
@@ -210,12 +210,12 @@ Escenario: Producto solo en enteros
 **Backend** — `unidad_medida`, `permite_cantidad_fraccionada` en `Producto`; propagación a
 `Stock` y (contrato) a `OrdenItem`. Cálculo de precio vía `PriceResolver`/`Money`.
 **Frontend** — Gestión: selector de unidad + toggle de fracción.
-**Dependencias** — HU-CAT-02.
+**Dependencias** — HU-ALPQ-3.
 **Ref PRD** — §4, §4.bis (venta por peso, peso a mano en MVP), §5.
 
 ---
 
-## HU-CAT-07 — Grupos de modificadores (restaurante)
+## HU-ALPQ-8 — Grupos de modificadores (restaurante)
 
 **Como** dueño de restaurante **quiero** definir grupos de modificadores (ej. "Término",
 "Extras") **para** que el POS ofrezca opciones al agregar el ítem.
@@ -237,12 +237,12 @@ Escenario: Grupo obligatorio de selección única
 **Backend** — `GrupoModificador` (min/max selección, obligatorio) y `Modificador`
 (nombre, precio vía `Money`). Asociación a producto. Consumo real en Ventas core.
 **Frontend** — Gestión: editor de grupos/modificadores por producto.
-**Dependencias** — HU-CAT-02.
+**Dependencias** — HU-ALPQ-3.
 **Ref PRD** — §4 (modificadores), §5 `GrupoModificador`/`Modificador`.
 
 ---
 
-## HU-CAT-08 — Código de barras y búsqueda por código
+## HU-ALPQ-9 — Código de barras y búsqueda por código
 
 **Como** cajero **quiero** encontrar un producto escaneando su código de barras **para**
 agregarlo a la venta rápido.
@@ -269,12 +269,12 @@ ese campo, PRD §4.bis). Índice para lookup rápido. Contrato agnóstico a plat
 **Frontend** — **Gestión**: campo de código en el editor de variante. **POS** (consume):
 campo de captura HID bien diseñado; escaneo por cámara en mobile queda como costura (PRD §11,
 librería a definir en su momento — no en esta HU).
-**Dependencias** — HU-CAT-02/03.
+**Dependencias** — HU-ALPQ-3 y HU-ALPQ-4.
 **Ref PRD** — §4.bis (lector, cámara), §5 `Variante.codigo_barra`, §11.
 
 ---
 
-## HU-CAT-09 — Flags operativos del producto (preparación / control de inventario)
+## HU-ALPQ-10 — Flags operativos del producto (preparación / control de inventario)
 
 **Como** dueño **quiero** marcar si un producto requiere preparación en cocina y si controla
 inventario **para** que el flujo de orden y de stock se comporten según el producto, no según
@@ -294,12 +294,12 @@ Escenario: Producto sin control de inventario
 **Backend** — `requiere_preparacion`, `controla_inventario` en `Producto`. Estos flags los
 **consumen** Ventas (comanda) e Inventario (descuento); aquí solo se definen.
 **Frontend** — Gestión: toggles en el form de producto.
-**Dependencias** — HU-CAT-02.
+**Dependencias** — HU-ALPQ-3.
 **Ref PRD** — §1 (modelo unificado), §4, §7 (capacidades ortogonales).
 
 ---
 
-## HU-INV-10 — Consultar stock por sucursal
+## HU-ALPQ-11 — Consultar stock por sucursal
 
 **Como** dueño/administrador **quiero** ver existencias por variante y sucursal **para**
 saber qué tengo y dónde.
@@ -318,12 +318,12 @@ Escenario: Variantes sin control de inventario
 **Backend** — `Stock` (variante_id, sucursal_id, cantidad decimal, stock_minimo). Consulta
 filtrada por `empresa_id`/`sucursal_id`.
 **Frontend** — Gestión: vista de stock por sucursal (tabla densa, mobile pensado).
-**Dependencias** — HU-CAT-03, Épica 0 (sucursales).
+**Dependencias** — HU-ALPQ-4, Épica 0 (sucursales).
 **Ref PRD** — §4 Inventario, §5 `Stock`.
 
 ---
 
-## HU-INV-11 — Registrar movimiento de inventario (ajuste con motivo)
+## HU-ALPQ-12 — Registrar movimiento de inventario (ajuste con motivo)
 
 **Como** administrador **quiero** ajustar stock registrando el motivo **para** cuadrar
 existencias con trazabilidad (y alimentar reportes/IA futura).
@@ -346,12 +346,12 @@ referencia). Este endpoint cubre **ajuste/compra manual**; venta y devolución l
 Ventas/Facturación. Actualización de `Stock` transaccional. **Motivo obligatorio** (dato rico
 para IA, PRD §9.bis).
 **Frontend** — Gestión: form de ajuste con motivo; historial de movimientos por variante.
-**Dependencias** — HU-INV-10.
+**Dependencias** — HU-ALPQ-11.
 **Ref PRD** — §4 Inventario, §5 `MovimientoInventario`, §9.bis (datos ricos).
 
 ---
 
-## HU-INV-12 — Alertas de stock mínimo
+## HU-ALPQ-13 — Alertas de stock mínimo
 
 **Como** dueño **quiero** que se me avise cuando una variante baje de su stock mínimo
 **para** reabastecer a tiempo.
@@ -370,12 +370,12 @@ Escenario: Detectar bajo mínimo
 **Backend** — `stock_minimo` por `Stock`; consulta/derivación de variantes bajo mínimo por
 sucursal. (Notificación push/programada = fuera, solo la señal consultable en MVP.)
 **Frontend** — Gestión: indicador/lista de alertas de stock bajo.
-**Dependencias** — HU-INV-10, HU-INV-11.
+**Dependencias** — HU-ALPQ-11, HU-ALPQ-12.
 **Ref PRD** — §4 (alertas de stock mínimo), §5 `Stock.stock_minimo`.
 
 ---
 
-## HU-CAT-13 — (Costura) Dejar abierta la composición de producto (BOM/combos)
+## HU-ALPQ-14 — (Costura) Dejar abierta la composición de producto (BOM/combos)
 
 **Como** equipo **queremos** que el modelo de producto **permita** una composición opcional
 de otros productos **para** poder agregar combos en fase 2 sin cirugía.
@@ -391,17 +391,17 @@ Escenario: Modelo admite composición opcional
 **Backend** — dejar la relación de composición en el modelo (nullable/vacía por defecto). Sin
 endpoints de combos ni lógica de expansión. Es **solo no cerrar la puerta**.
 **Frontend** — ninguno en MVP.
-**Dependencias** — HU-CAT-02.
+**Dependencias** — HU-ALPQ-3.
 **Ref PRD** — §9.bis (combos/paquetes → composición/BOM opcional).
 
 ---
 
 ## Notas de secuencia sugerida (para ordenar el sprint)
 
-1. HU-CAT-01 → CAT-02 (cimiento: categoría + producto simple + variante/SKU).
-2. CAT-05, CAT-06, CAT-09 (atributos tributarios y operativos del producto — baratos, alto valor).
-3. CAT-03, CAT-04 (variantes por ejes y atributos descriptivos).
-4. CAT-08 (código de barras + búsqueda — habilita POS).
-5. INV-10 → INV-11 → INV-12 (stock y movimientos).
-6. CAT-07 (modificadores — solo si el negocio piloto es restaurante).
-7. CAT-13 (costura BOM — junto con CAT-02, es una decisión de modelo, no una feature).
+1. HU-ALPQ-2 → ALPQ-3 (cimiento: categoría + producto simple + variante/SKU).
+2. ALPQ-6, ALPQ-7, ALPQ-10 (atributos tributarios y operativos del producto — baratos, alto valor).
+3. ALPQ-4, ALPQ-5 (variantes por ejes y atributos descriptivos).
+4. ALPQ-9 (código de barras + búsqueda — habilita POS).
+5. ALPQ-11 → ALPQ-12 → ALPQ-13 (stock y movimientos).
+6. ALPQ-8 (modificadores — solo si el negocio piloto es restaurante).
+7. ALPQ-14 (costura BOM — junto con ALPQ-3, es una decisión de modelo, no una feature).

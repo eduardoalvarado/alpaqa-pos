@@ -3,7 +3,7 @@
 > **Fecha:** 2026-07-21 · **Estado:** borrador para revisión · **Dominio:** Catálogo e inventario
 >
 > PRD de dominio generado **just-in-time** antes de implementar (PRD maestro §10). Traduce las
-> HUs (`docs/hus/epica-catalogo-e-inventario.md`, cargadas a Jira KAN-1..KAN-14 — Jira es la
+> HUs (`docs/hus/epica-catalogo-e-inventario.md`, cargadas a Jira ALPQ-1..ALPQ-14 — Jira es la
 > fuente de verdad del backlog) en el **diseño técnico** del dominio: modelo de datos, módulos,
 > puertos, contrato de API e invariantes.
 >
@@ -24,7 +24,7 @@ tributación, unidad de medida) y el **control de stock por sucursal** (existenc
 movimientos con motivo, alertas de mínimo), dejando **abiertas las costuras** de combos/BOM y
 resolución de precio sin construirlas.
 
-**Dentro** (13 HUs): CAT-01..09 (catálogo), INV-10..12 (inventario), CAT-13 (costura BOM).
+**Dentro** (13 HUs): ALPQ-2..09 (catálogo), ALPQ-11..12 (inventario), ALPQ-14 (costura BOM).
 Detalle y criterios de aceptación en el archivo de HUs; aquí no se repiten.
 
 **Fuera (referenciado, otros dominios):**
@@ -110,7 +110,7 @@ float (lineamientos §2.1); cantidades de stock en `numeric` decimal.
 | precio | numeric(12,4) NULL | override; `NULL` ⇒ hereda `Producto.precio_base`. **Lectura vía `PriceResolver`** |
 | activo | boolean | borrado lógico |
 
-**Ejes de variante** (definición para generar combinaciones — HU-CAT-03):
+**Ejes de variante** (definición para generar combinaciones — HU-ALPQ-4):
 - **`EjeVariante`**: id, producto_id, nombre (`Talla`), orden.
 - **`ValorEje`**: id, eje_id FK, valor (`S`), orden.
 - **`VarianteValor`** (puente): variante_id FK, valor_eje_id FK. La combinación de valores de
@@ -119,14 +119,14 @@ float (lineamientos §2.1); cantidades de stock en `numeric` decimal.
   integridad referencial (querables, «datos ricos» §9.bis). Los **descriptivos** van en
   `Producto.atributos_opcionales` (JSON) y **no** generan variantes.
 
-**Modificadores** (restaurante — HU-CAT-07):
+**Modificadores** (restaurante — HU-ALPQ-8):
 - **`GrupoModificador`**: id, empresa_id, producto_id FK, nombre, `seleccion_min` int,
   `seleccion_max` int (`NULL` = ilimitado), obligatorio boolean, orden, activo.
   Obligatorio + única = `min=1, max=1`.
 - **`Modificador`**: id, grupo_id FK, nombre, `precio_delta` numeric(12,4) (vía `Money`),
   activo, orden.
 
-**Costura BOM/combos** (HU-CAT-13 — solo modelo, sin lógica):
+**Costura BOM/combos** (HU-ALPQ-14 — solo modelo, sin lógica):
 - **`ComponenteProducto`**: id, empresa_id, producto_padre_id FK, componente_variante_id FK,
   cantidad numeric(14,4). **Vacía por defecto** ⇒ producto atómico. Sin endpoints ni expansión
   de precio/stock en el MVP (PRD §9.bis). Es *no cerrar la puerta*.
@@ -141,7 +141,7 @@ float (lineamientos §2.1); cantidades de stock en `numeric` decimal.
 | variante_id | uuid FK → Variante | |
 | sucursal_id | uuid FK → Sucursal | scoping por sucursal (PRD §5) |
 | cantidad | numeric(14,4) | decimal según unidad de medida |
-| stock_minimo | numeric(14,4) NULL | umbral de alerta (HU-INV-12) |
+| stock_minimo | numeric(14,4) NULL | umbral de alerta (HU-ALPQ-13) |
 
 - Unicidad: `(variante_id, sucursal_id)`. Variantes de productos con
   `controla_inventario=false` **no exigen** fila de stock.
@@ -155,7 +155,7 @@ float (lineamientos §2.1); cantidades de stock en `numeric` decimal.
 | sucursal_id | uuid FK | |
 | tipo | enum `TipoMovimiento` | `VENTA \| COMPRA \| AJUSTE \| DEVOLUCION` |
 | cantidad | numeric(14,4) | con signo (o `sentido` +/−); + entra, − sale |
-| motivo | text | **obligatorio** (rechazo si falta — HU-INV-11) |
+| motivo | text | **obligatorio** (rechazo si falta — HU-ALPQ-12) |
 | referencia_tipo | text NULL | `ORDEN` \| `NOTA_CREDITO` (para movimientos de otros dominios) |
 | referencia_id | uuid NULL | |
 | usuario_id | uuid FK | quién lo registró |
@@ -163,7 +163,7 @@ float (lineamientos §2.1); cantidades de stock en `numeric` decimal.
 - **Invariante transaccional:** registrar un movimiento y actualizar `Stock.cantidad` ocurren
   en **una sola transacción**. `Stock.cantidad` es el valor vigente; los movimientos son el
   ledger reconstruible.
-- Este dominio **expone solo** `AJUSTE` y `COMPRA` manual (HU-INV-11). `VENTA` y `DEVOLUCION`
+- Este dominio **expone solo** `AJUSTE` y `COMPRA` manual (HU-ALPQ-12). `VENTA` y `DEVOLUCION`
   los generan **Ventas/Facturación** escribiendo en esta misma tabla (costura ya prevista).
 
 ### 3.3 Enums
@@ -195,7 +195,7 @@ falta alguna, preservando consistencia para reportes/IA) · `TipoMovimiento {VEN
 ### 4.2 Invariantes del dominio
 
 1. **Todo producto tiene ≥1 variante.** Crear producto simple crea, transaccionalmente, la
-   variante `es_default=true` con su SKU (HU-CAT-02).
+   variante `es_default=true` con su SKU (HU-ALPQ-3).
 2. **SKU único por empresa**, editable mientras la variante no tenga movimientos;
    **inmutable una vez con historial** (protege trazabilidad de inventario/ventas e importación
    CSV, que usa `(empresa_id, sku)` como llave).
@@ -227,7 +227,7 @@ Recursos bajo el tenant autenticado (JWT + RBAC). Alto nivel; el detalle de DTOs
   `POST /productos/:id/variantes:generar` (propone combinaciones), `PATCH /variantes/:id`
   (SKU, código, precio, activo).
 - **Búsqueda por código** — `GET /variantes/buscar?codigo=` → resuelve por `codigo_barra`;
-  «no encontrado» sin error de sistema (HU-CAT-08). Contrato **agnóstico a plataforma** (el POS
+  «no encontrado» sin error de sistema (HU-ALPQ-9). Contrato **agnóstico a plataforma** (el POS
   captura con lector HID; cámara = costura fase 2).
 - **Modificadores** — `GET/POST /productos/:id/grupos-modificadores` y modificadores anidados.
 - **Stock** — `GET /stock?sucursal_id=` (existencias por variante), `GET /stock/alertas?sucursal_id=`
@@ -290,19 +290,19 @@ No quedan pendientes de decisión abiertos en este dominio.
 
 | HU | Entregable técnico principal |
 |---|---|
-| CAT-01 | `Categoria` + CRUD + unicidad + soft delete |
-| CAT-02 | `Producto` + creación transaccional de `Variante` `es_default`; SKU único; `PriceResolver`/`Money` |
-| CAT-03 | `EjeVariante`/`ValorEje`/`VarianteValor`; generación de combinaciones; SKU/precio/código por variante |
-| CAT-04 | `Producto.atributos_opcionales` (jsonb) |
-| CAT-05 | `tipo_afectacion_igv`, `afecto_icbper` (snapshot en venta, no cálculo aquí) |
-| CAT-06 | `unidad_medida`, `permite_cantidad_fraccionada`; cálculo peso×precio vía `Money` |
-| CAT-07 | `GrupoModificador`/`Modificador` (min/max/obligatorio) |
-| CAT-08 | `codigo_barra` + `GET /variantes/buscar`; índice de lookup |
-| CAT-09 | flags `requiere_preparacion`, `controla_inventario` (los consumen otros dominios) |
-| INV-10 | `Stock` + consulta por sucursal |
-| INV-11 | `MovimientoInventario` (ajuste/compra, motivo obligatorio) + update transaccional |
-| INV-12 | `stock_minimo` + consulta de alertas |
-| CAT-13 | `ComponenteProducto` (costura, sin lógica) |
+| ALPQ-2 | `Categoria` + CRUD + unicidad + soft delete |
+| ALPQ-3 | `Producto` + creación transaccional de `Variante` `es_default`; SKU único; `PriceResolver`/`Money` |
+| ALPQ-4 | `EjeVariante`/`ValorEje`/`VarianteValor`; generación de combinaciones; SKU/precio/código por variante |
+| ALPQ-5 | `Producto.atributos_opcionales` (jsonb) |
+| ALPQ-6 | `tipo_afectacion_igv`, `afecto_icbper` (snapshot en venta, no cálculo aquí) |
+| ALPQ-7 | `unidad_medida`, `permite_cantidad_fraccionada`; cálculo peso×precio vía `Money` |
+| ALPQ-8 | `GrupoModificador`/`Modificador` (min/max/obligatorio) |
+| ALPQ-9 | `codigo_barra` + `GET /variantes/buscar`; índice de lookup |
+| ALPQ-10 | flags `requiere_preparacion`, `controla_inventario` (los consumen otros dominios) |
+| ALPQ-11 | `Stock` + consulta por sucursal |
+| ALPQ-12 | `MovimientoInventario` (ajuste/compra, motivo obligatorio) + update transaccional |
+| ALPQ-13 | `stock_minimo` + consulta de alertas |
+| ALPQ-14 | `ComponenteProducto` (costura, sin lógica) |
 
 ---
 
@@ -312,7 +312,7 @@ No quedan pendientes de decisión abiertos en este dominio.
 Postgres, y **núcleo de tenancy**: `Empresa`, `Sucursal`, `Usuario`, `Rol` + `empresa_id`/RLS).
 Este dominio **cuelga** de ese núcleo (Épica 0 / Plataforma). No se implementa Catálogo sin él.
 
-Orden sugerido (del archivo de HUs): CAT-01→02 (cimiento del catálogo) → CAT-05/06/09 (campos
-del producto, baratos y de alto valor) → CAT-03/04 (variantes por ejes y descriptivos) →
-CAT-08 (código de barras, habilita POS) → INV-10→11→12 (stock y movimientos) → CAT-07
-(modificadores, si el piloto es restaurante) → CAT-13 (costura BOM, junto con CAT-02).
+Orden sugerido (del archivo de HUs): ALPQ-2→ALPQ-3 (cimiento del catálogo) → ALPQ-6/7/10 (campos
+del producto, baratos y de alto valor) → ALPQ-4/5 (variantes por ejes y descriptivos) →
+ALPQ-9 (código de barras, habilita POS) → ALPQ-11→12→13 (stock y movimientos) → ALPQ-8
+(modificadores, si el piloto es restaurante) → ALPQ-14 (costura BOM, junto con ALPQ-3).
