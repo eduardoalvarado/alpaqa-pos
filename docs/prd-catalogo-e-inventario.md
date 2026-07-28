@@ -119,7 +119,7 @@ float (lineamientos §2.1); cantidades de stock en `numeric` decimal.
   integridad referencial (querables, «datos ricos» §9.bis). Los **descriptivos** van en
   `Producto.atributos_opcionales` (JSON) y **no** generan variantes.
 
-**Modificadores** (restaurante — HU-ALPQ-8):
+**Modificadores** (opcionales por producto, rubro-agnóstico — HU-ALPQ-8):
 - **`GrupoModificador`**: id, empresa_id, producto_id FK, nombre, `seleccion_min` int,
   `seleccion_max` int (`NULL` = ilimitado), obligatorio boolean, orden, activo.
   Obligatorio + única = `min=1, max=1`.
@@ -315,4 +315,5 @@ Este dominio **cuelga** de ese núcleo (Épica 0 / Plataforma). No se implementa
 Orden sugerido (del archivo de HUs): ALPQ-2→ALPQ-3 (cimiento del catálogo) → ALPQ-6/7/10 (campos
 del producto, baratos y de alto valor) → ALPQ-4/5 (variantes por ejes y descriptivos) →
 ALPQ-9 (código de barras, habilita POS) → ALPQ-11→12→13 (stock y movimientos) → ALPQ-8
-(modificadores, si el piloto es restaurante) → ALPQ-14 (costura BOM, junto con ALPQ-3).
+(modificadores; menor prioridad si el piloto no los usa —criterio de uso del feature, no de
+rubro—) → ALPQ-14 (costura BOM, junto con ALPQ-3).

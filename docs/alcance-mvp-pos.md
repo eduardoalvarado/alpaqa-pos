@@ -96,7 +96,7 @@ Como las tres superficies consumen el mismo backend, **el diseño de la API y el
 - El rol también determina a qué superficie puede acceder el usuario (vía permisos `acceso_*`).
 
 ### Catálogo
-- Productos, categorías, variantes, modificadores (grupos de modificadores para restaurante).
+- Productos, categorías, variantes, modificadores (grupos de modificadores por producto: opciones con precio, min/max/obligatorio). Rubro-agnóstico (§1): son opcionales por producto, no gated por capacidad; comunes en restaurante (término, extras) pero también aplican a bodega/cafetería (tamaño, tipo de leche) o retail (envoltura, grabado).
 - Flags: `requiere_preparacion`, `controla_inventario`.
 - `tipo_afectacion_igv` por producto: gravado / exonerado / inafecto.
 - **SKU como identificador único** de la unidad de stock. Vive en la variante (ver modelo de datos), único por empresa. Todo producto tiene al menos una variante (una "por defecto" cuando no tiene variaciones reales), de modo que SKU, código de barras y stock siempre cuelgan de la misma entidad.
@@ -199,7 +199,7 @@ La abstracción de impresión y de captura de código debe modelarse como un **s
 - `Categoria` — empresa_id, nombre.
 - `Producto` — empresa_id, categoria_id, nombre, precio, requiere_preparacion, controla_inventario, tipo_afectacion_igv, afecto_icbper (para bolsas de plástico), unidad_medida, permite_cantidad_fraccionada, atributos_opcionales (peso, medidas, material, marca… flexibles).
 - `Variante` — producto_id, ejes (talla, color…), precio, **sku (único por empresa)**, codigo_barra. Todo producto tiene ≥1 variante (una por defecto si no tiene variaciones reales); SKU, código de barras y stock cuelgan siempre de aquí.
-- `GrupoModificador`, `Modificador` — opciones y precios (restaurante).
+- `GrupoModificador`, `Modificador` — opciones y precios por producto (min/max/obligatorio). Rubro-agnóstico; restaurante es el caso más común, no el único.
 
 > Decisión de modelado: los atributos que **definen** unidades de stock distintas (talla, color) son ejes de `Variante`; los atributos meramente **descriptivos** (peso, medidas, material) van en `atributos_opcionales` del producto y no generan variantes.
 

@@ -116,8 +116,12 @@ se escribe crudo pero **toda lectura pasa por `PriceResolver`**. Dinero vía `Mo
 
 ## HU-ALPQ-4 — Producto con variantes por ejes (talla/color → múltiples SKU)
 
-**Como** dueño de tienda **quiero** definir ejes de variante (talla, color) **para** que cada
+**Como** dueño de negocio **quiero** definir ejes de variante (talla, color) **para** que cada
 combinación sea una unidad de stock con su propio SKU y código de barras.
+
+> Rubro-agnóstico (PRD §1): los ejes de variante aplican a cualquier producto que tenga
+> variaciones de stock; talla/color son el ejemplo típico de retail, pero un restaurante
+> también puede tener presentaciones (ej. tamaño de botella). No es una feature de un solo rubro.
 
 **Criterios de aceptación**
 ```gherkin
@@ -215,10 +219,16 @@ Escenario: Producto solo en enteros
 
 ---
 
-## HU-ALPQ-8 — Grupos de modificadores (restaurante)
+## HU-ALPQ-8 — Grupos de modificadores de producto
 
-**Como** dueño de restaurante **quiero** definir grupos de modificadores (ej. "Término",
-"Extras") **para** que el POS ofrezca opciones al agregar el ítem.
+**Como** dueño de negocio **quiero** definir grupos de modificadores por producto (ej.
+"Término", "Extras", "Tamaño", "Tipo de leche") **para** que el POS ofrezca opciones al agregar
+el ítem.
+
+> Rubro-agnóstico (PRD §1): los modificadores son **opcionales por producto**, no están gated
+> por capacidad. Comunes en restaurante (término, extras), pero también aplican a
+> bodega/cafetería (tamaño, tipo de leche) o retail (envoltura de regalo, grabado). El
+> restaurante es el caso más común, no el único.
 
 **Criterios de aceptación**
 ```gherkin
@@ -403,5 +413,5 @@ endpoints de combos ni lógica de expansión. Es **solo no cerrar la puerta**.
 3. ALPQ-4, ALPQ-5 (variantes por ejes y atributos descriptivos).
 4. ALPQ-9 (código de barras + búsqueda — habilita POS).
 5. ALPQ-11 → ALPQ-12 → ALPQ-13 (stock y movimientos).
-6. ALPQ-8 (modificadores — solo si el negocio piloto es restaurante).
+6. ALPQ-8 (modificadores — menor prioridad si el piloto no los usa; criterio de uso del feature, no de rubro).
 7. ALPQ-14 (costura BOM — junto con ALPQ-3, es una decisión de modelo, no una feature).
