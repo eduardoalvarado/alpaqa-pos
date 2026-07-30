@@ -62,6 +62,20 @@ src/modules/<contexto>/
 - **CRUD ligero** (módulo Nest + servicio sobre Prisma) en módulos simples de
   configuración, sin ceremonia hexagonal.
 
+**Regla de dependencias — apuntan hacia adentro** (`infrastructure → application → domain`):
+
+- `domain/` — entidades, value objects, invariantes, **puertos** (`ports/*.port.ts`:
+  interfaz + token `Symbol`) y **errores** (`errors/`). Cero imports de Nest, Prisma o HTTP.
+  No conoce a nadie hacia afuera.
+- `application/` — casos de uso (`*.use-case.ts`) que orquestan el dominio **a través de
+  puertos**. **Excepción pragmática:** pueden usar los decoradores de DI de Nest
+  (`@Injectable`, `@Inject(TOKEN)`) — ese es el *único* acople a framework permitido aquí;
+  nada de Prisma, HTTP ni adapters. No importan de `infrastructure/`.
+- `infrastructure/` — adapters intercambiables que **implementan** los puertos del dominio:
+  `persistence/` (repos `prisma-*` + un `in-memory-*` para tests), `http/`
+  (`*.controller.ts` + `*.dto.ts` con class-validator en el borde), clientes externos.
+  El dinero cruza siempre como `Money`, nunca `number`.
+
 ### 2.3 Puertos (seams) obligatorios desde el día uno
 
 El PRD los exige; se modelan como interfaces del dominio con adapters intercambiables:
