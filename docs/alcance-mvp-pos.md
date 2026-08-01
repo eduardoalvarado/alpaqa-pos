@@ -353,7 +353,7 @@ Este documento (evolucionado) es la **fuente de verdad** de todo lo que cruza do
 ### PRDs por dominio funcional
 Se agrupan módulos acoplados que se diseñan juntos. Cada PRD de dominio **referencia** el documento raíz para las decisiones transversales, no las repite.
 
-- **Ventas y operación** — órdenes, mesas, comandas/KDS.
+- **Ventas y operación** — la **`Order` unificada (rubro-agnóstica)** como núcleo (venta directa: mostrador/para llevar/delivery); **mesas** y **comandas/KDS** son **capas opcionales gated por capacidad** (`usesTables`/`usesKitchen`), no pilares del dominio. El código nunca ramifica por rubro/`tipo_negocio`, solo por capacidad y por el flag de producto `requiresPreparation`.
 - **Cobros y caja** — pagos, pago mixto, turnos, arqueo.
 - **Facturación electrónica** — comprobantes, notas de crédito, series/correlativo, integración PSE.
 - **Catálogo e inventario** — productos, variantes, modificadores, stock, código de barras.
