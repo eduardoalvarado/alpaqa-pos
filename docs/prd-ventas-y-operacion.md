@@ -199,9 +199,14 @@ Todas las tablas son **tenant** (`companyId` + RLS en dos capas, invariante 4) y
    y respeta `Role.maxDiscountPct`; anular exige `anular_venta`. Nunca por nombre de rol.
 5. **Orden abierta = una transacción por edición:** agregar/quitar ítems y recomputar totales
    ocurre atómico; la mesa mantiene a lo sumo una `Order` `OPEN`.
-6. **Cerrar es irreversible hacia cobro:** `CLOSED` congela la orden y dispara, en una
-   transacción, los movimientos de inventario `SALE` de las variantes que controlan stock
-   (invariante 5 de Inventario). El pago y el comprobante los hacen otros dominios.
+6. **Cerrar es irreversible hacia cobro:** `CLOSED` congela la orden y dispara los movimientos
+   de inventario `SALE` de las variantes que controlan stock (invariante 5 de Inventario).
+   **Decisión de implementación (SAL-05):** como `withTenant` no anida transacciones, el cierre
+   y la salida de stock son **dos escrituras ordenadas** (primero el `SALE`, luego el `CLOSED`)
+   en vez de una sola transacción; el `registerSale` es **idempotente por `orderId`**
+   (`referenceType=ORDER`, `referenceId=orderId`), de modo que un reintento tras una falla parcial
+   ni descuenta stock dos veces ni deja la orden cerrada sin movimiento. El pago y el comprobante
+   los hacen otros dominios.
 7. **Comanda solo para `requiresPreparation`:** solo ítems con el flag entran a `KitchenTicket`;
    sin cocina (`!usesKitchen`) no se generan comandas — la venta funciona igual.
 8. **Aislamiento por tenant en dos capas** (filtro + RLS) incluido el scoping por `branchId`.
@@ -267,7 +272,9 @@ vocabulario — se usan esos; ver `permission.ts`). Impresión de comanda/ticket
 
 - La `Order` es rubro-agnóstica; mesas y cocina son **capas gated por capacidad**, no pilares.
 - Snapshot en `OrderItem` al agregar; catálogo nunca releído para el importe.
-- `SALE`/`RETURN` a inventario por puerto, transaccional con el cierre/devolución.
+- `SALE`/`RETURN` a inventario por el puerto `InventoryWriter`, reusando el ledger transaccional
+  de Inventario. Cierre/devolución y movimiento son **dos escrituras ordenadas + idempotencia por
+  `orderId`** (no una sola transacción; ver §4.2 invariante 6).
 - Autorización de descuento/anulación por **permiso** (+ `maxDiscountPct`), nunca por rubro/rol-nombre.
 - **Todo en inglés, incluido el físico** (tablas/columnas `snake_case` vía `@map`); los dominios
   previos conservan su físico español (ver §0).
