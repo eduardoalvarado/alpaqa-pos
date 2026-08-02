@@ -237,13 +237,25 @@ Recursos bajo el tenant autenticado (JWT + RBAC). DTOs con class-validator en el
   `POST /orders/:id/close`, `POST /orders/:id/cancel` (permiso `anular_venta`).
 - **Devoluciones** — `POST /orders/:id/returns` (reingreso a stock + costura nota de crédito).
 - **Mesas (`usesTables`)** — `GET/POST /tables`, `PATCH /tables/:id`; `POST /orders` con
-  `channel=DINE_IN` + `tableId` abre orden de mesa; `POST /orders/:id/items` la construye por etapas.
+  `channel=DINE_IN` + `tableId` abre orden de mesa; `POST /orders/:id/items` la construye por etapas;
+  `PATCH /orders/:id/waiter` (re)asigna el mesero.
   **Permisos (decisión SAL-07):** el CRUD del plano (alta/edición de mesas) es **setup del
   negocio** → `gestionar_configuracion`; **listar** el plano es operación de POS → `vender`.
   Toda la superficie está **gateada por la capacidad** `usaMesas` en los use-cases: una empresa
   sin salón recibe `409 TABLES_DISABLED` (código de dominio nuevo). El puerto
   `CompanyCapabilityReader` (lee `usaMesas`/`usaCocina`) confina esa lectura cross-context a
   infraestructura y lo **reutiliza** la capa de cocina (SAL-09).
+  **Decisiones SAL-08 (orden en mesa):** abrir DINE_IN exige mesa `FREE`, la ocupa (`OCCUPIED`),
+  asigna mesero (por defecto quien abre) y **puede abrir sin ítems** (la mesa se arma por etapas).
+  Cerrar (SAL-05) o anular (SAL-04) **libera la mesa** (`FREE`), todo atómico en la misma
+  transacción tenant. El invariante «una mesa `OCCUPIED` ↔ a lo sumo una `Order` `OPEN`» (§3.2)
+  se garantiza con doble defensa: chequeo aplicativo de mesa `FREE` **+ índice único parcial**
+  `order(table_id) WHERE status='OPEN'`. Reasignar mesero requiere `vender` y solo aplica a
+  órdenes `DINE_IN`. Errores nuevos: `TABLE_NOT_FREE` (409), `WAITER_NOT_FOUND` (404); venta
+  directa con mesa o DINE_IN sin mesa → 422.
+  **Consecuencia de contrato:** como una mesa puede abrir con `items=[]`, el arreglo vacío pasa a
+  ser válido en el borde; la regla «venta directa exige ≥1 ítem» vive ahora en el use-case
+  (**422**, antes 400 de validación de borde).
 - **Comandas (`usesKitchen`)** — `POST /orders/:id/kitchen-tickets` (enviar tanda a cocina),
   `GET /kitchen-tickets?branchId=&status=` (cola KDS), `PATCH /kitchen-tickets/:id` (avanzar estado).
 
