@@ -238,6 +238,12 @@ Recursos bajo el tenant autenticado (JWT + RBAC). DTOs con class-validator en el
 - **Devoluciones** — `POST /orders/:id/returns` (reingreso a stock + costura nota de crédito).
 - **Mesas (`usesTables`)** — `GET/POST /tables`, `PATCH /tables/:id`; `POST /orders` con
   `channel=DINE_IN` + `tableId` abre orden de mesa; `POST /orders/:id/items` la construye por etapas.
+  **Permisos (decisión SAL-07):** el CRUD del plano (alta/edición de mesas) es **setup del
+  negocio** → `gestionar_configuracion`; **listar** el plano es operación de POS → `vender`.
+  Toda la superficie está **gateada por la capacidad** `usaMesas` en los use-cases: una empresa
+  sin salón recibe `409 TABLES_DISABLED` (código de dominio nuevo). El puerto
+  `CompanyCapabilityReader` (lee `usaMesas`/`usaCocina`) confina esa lectura cross-context a
+  infraestructura y lo **reutiliza** la capa de cocina (SAL-09).
 - **Comandas (`usesKitchen`)** — `POST /orders/:id/kitchen-tickets` (enviar tanda a cocina),
   `GET /kitchen-tickets?branchId=&status=` (cola KDS), `PATCH /kitchen-tickets/:id` (avanzar estado).
 
