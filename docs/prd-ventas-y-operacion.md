@@ -258,6 +258,19 @@ Recursos bajo el tenant autenticado (JWT + RBAC). DTOs con class-validator en el
   (**422**, antes 400 de validación de borde).
 - **Comandas (`usesKitchen`)** — `POST /orders/:id/kitchen-tickets` (enviar tanda a cocina),
   `GET /kitchen-tickets?branchId=&status=` (cola KDS), `PATCH /kitchen-tickets/:id` (avanzar estado).
+  **Decisiones SAL-09:** las tres operaciones son superficie POS → permiso `vender`, gateadas por
+  la capacidad `usaCocina` (409 `KITCHEN_DISABLED`). El envío es **append-only**: cada tanda es una
+  comanda nueva con `sequence` creciente por orden (único `(orderId, sequence)`), y **solo** entran
+  ítems con `requiresPreparationSnapshot=true` (invariante 7) — si el request no detalla ítems, van
+  todos los de preparación a cantidad plena; si los detalla, se validan contra la orden. La orden
+  debe estar `OPEN`. El estado avanza **solo hacia adelante** (`PENDING`→`IN_PROGRESS`→`READY`→
+  `SERVED`, regla pura; retroceder → `409 KITCHEN_TRANSITION_INVALID`). El nombre a mostrar en
+  cocina se lee del `nameSnapshot` del `OrderItem` (no se re-copia). Errores nuevos:
+  `KITCHEN_TICKET_INVALID` (422), `KITCHEN_TICKET_NOT_FOUND` (404).
+  **`PrinterPort` cerrado (SAL-09):** puerto de dominio (ESC/POS) con adapter **stub** en el backend
+  que formatea y registra la comanda; la impresión física vive del lado del POS y **nunca tumba el
+  envío** si el hardware falla (el KDS consultable queda como fuente). El push en tiempo real
+  (WebSocket/SSE) sigue siendo fase 2 (§7).
 
 Permisos RBAC nuevos que este dominio agrega (al nacer, lineamientos): `vender`,
 `aplicar_descuento`, `anular_venta` (ya existen `vender`/`aplicar_descuento`/`anular_venta` en el
@@ -348,3 +361,10 @@ tienda) → `SAL-06` (devolución) → `SAL-07 → SAL-08` (mesas, si `usesTable
 **Decidido (ago-2026):** puertos `InventoryWriter`/`CatalogReader` confirmados; físico de las
 tablas nuevas en **inglés** `snake_case` (§0). El detalle fino del contrato `PrinterPort`
 (ESC/POS) se cierra al implementar `SAL-09` (cocina), no bloquea el núcleo.
+
+**Estado (ago-2026): dominio Ventas y operación COMPLETO.** `SAL-01..09` (ALPQ-26..34)
+implementadas, auditadas (fieles al plan + arquitectura sana) y en Jira **Listo**. El seam
+`PrinterPort` quedó **cerrado** en SAL-09 (adapter ESC/POS stub del lado backend). Quedan como
+fase 2 las costuras de §7 (KDS en tiempo real, split/merge de mesas, delivery con tracking,
+cliente en la orden, sync offline) y las deudas registradas: tope acumulado de devolución
+(§4.3, SAL-06) y desglose de IGV (Facturación).
