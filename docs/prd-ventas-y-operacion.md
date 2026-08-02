@@ -215,6 +215,11 @@ Todas las tablas son **tenant** (`companyId` + RLS en dos capas, invariante 4) y
 
 - **Inventario:** cerrar una orden → `MovementType.SALE`; una devolución → `RETURN` con reingreso
   (ALPQ-12 ya soporta ambos tipos con `referenceType/Id`).
+  - **Límite conocido de SAL-06 (deuda para fase 2 / Facturación):** la devolución valida
+    `cantidad ≤ vendida en la línea` **por request**, no contra el acumulado ya devuelto (no hay
+    entidad de devolución en el MVP; la única traza es el ledger). Devoluciones parciales repetidas
+    pueden **sobre-devolver**. El tope acumulado se cerrará con la nota de crédito / entidad de
+    devolución en Facturación.
 - **Facturación:** la `Order` `CLOSED` es la fuente que el comprobante **snapshotea** (§6.D). La
   **devolución** genera nota de crédito allí. El **correlativo fiscal** por serie/caja vive en
   Facturación (§6.B), no en `Order.number`.
