@@ -195,8 +195,8 @@ Todas las tablas son **tenant** (`companyId` + RLS en dos capas, invariante 4) y
 2. **Dinero vía `Money`, nunca float.** Totales derivados por `Money` (líneas → subtotal →
    descuento → IGV según régimen → total).
 3. **Cantidad fraccionada** solo si el producto lo permite (`assertQuantityAllowed`, ALPQ-7).
-4. **Autorización por permiso, no por rubro (PRD §7):** aplicar descuento exige `apply_discount`
-   y respeta `Role.maxDiscountPct`; anular exige `void_sale`. Nunca por nombre de rol.
+4. **Autorización por permiso, no por rubro (PRD §7):** aplicar descuento exige `aplicar_descuento`
+   y respeta `Role.maxDiscountPct`; anular exige `anular_venta`. Nunca por nombre de rol.
 5. **Orden abierta = una transacción por edición:** agregar/quitar ítems y recomputar totales
    ocurre atómico; la mesa mantiene a lo sumo una `Order` `OPEN`.
 6. **Cerrar es irreversible hacia cobro:** `CLOSED` congela la orden y dispara, en una
@@ -223,16 +223,16 @@ Recursos bajo el tenant autenticado (JWT + RBAC). DTOs con class-validator en el
 
 - **Órdenes (núcleo)** — `POST /orders` (crear venta directa con ítems), `GET /orders?branchId=&status=`,
   `GET /orders/:id`, `POST /orders/:id/items` / `PATCH|DELETE /orders/:id/items/:itemId`
-  (editar orden abierta), `POST /orders/:id/discount` (permiso `apply_discount`),
-  `POST /orders/:id/close`, `POST /orders/:id/cancel` (permiso `void_sale`).
+  (editar orden abierta), `PATCH /orders/:id/discount` (permiso `aplicar_descuento`; body `{ itemId?, amount }`),
+  `POST /orders/:id/close`, `POST /orders/:id/cancel` (permiso `anular_venta`).
 - **Devoluciones** — `POST /orders/:id/returns` (reingreso a stock + costura nota de crédito).
 - **Mesas (`usesTables`)** — `GET/POST /tables`, `PATCH /tables/:id`; `POST /orders` con
   `channel=DINE_IN` + `tableId` abre orden de mesa; `POST /orders/:id/items` la construye por etapas.
 - **Comandas (`usesKitchen`)** — `POST /orders/:id/kitchen-tickets` (enviar tanda a cocina),
   `GET /kitchen-tickets?branchId=&status=` (cola KDS), `PATCH /kitchen-tickets/:id` (avanzar estado).
 
-Permisos RBAC nuevos que este dominio agrega (al nacer, lineamientos): `register_sale`,
-`apply_discount`, `void_sale` (ya existen `vender`/`aplicar_descuento`/`anular_venta` en el
+Permisos RBAC nuevos que este dominio agrega (al nacer, lineamientos): `vender`,
+`aplicar_descuento`, `anular_venta` (ya existen `vender`/`aplicar_descuento`/`anular_venta` en el
 vocabulario — se usan esos; ver `permission.ts`). Impresión de comanda/ticket vía `PrinterPort`.
 
 ---
@@ -283,8 +283,8 @@ vocabulario — se usan esos; ver `permission.ts`). Impresión de comanda/ticket
 |---|---|
 | `SAL-01` | `Order` + `OrderItem` con snapshot (precio vía `PriceResolver`, IGV, unidad); crear venta directa con ítems |
 | `SAL-02` | Editar orden abierta: agregar/quitar ítems, cambiar cantidad, recomputar totales (`Money`) |
-| `SAL-03` | Descuentos por línea y por orden con autorización (`apply_discount` + `maxDiscountPct`) |
-| `SAL-04` | Anular orden con autorización (`void_sale`) + `cancelReason` |
+| `SAL-03` | Descuentos por línea y por orden con autorización (`aplicar_descuento` + `maxDiscountPct`) |
+| `SAL-04` | Anular orden con autorización (`anular_venta`) + `cancelReason` |
 | `SAL-05` | Cerrar orden (`CLOSED`) + movimiento de inventario `SALE` transaccional (puerto `InventoryWriter`) |
 | `SAL-06` | Devolución con reingreso a stock (`RETURN`) + costura nota de crédito |
 
