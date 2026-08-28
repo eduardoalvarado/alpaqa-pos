@@ -200,6 +200,13 @@ maestro).
 | **`PrinterPort`** (§4.bis, existente) | recibo de pago al cliente y **reporte de cierre (Z)** del turno; adapter ESC/POS stub del lado backend (como SAL-09), la impresión física vive del POS y **nunca tumba** el cobro/cierre si el hardware falla. |
 | **`QrGenerator`** (nuevo) | payload **EMVCo** (QR interoperable) para Yape/Plin con el monto incluido; **generación local**, no integración de API (§8). Se cierra al implementar su HU. |
 
+> **Reconciliado (ago-2026, PAY-06/07):** en vez de reusar un `PrinterPort` genérico, el módulo
+> define su **puerto propio y estrecho** `ShiftReportPrinter.printClosingReport(shift)` con adapter
+> ESC/POS stub (`esc-pos-shift-report-printer.ts`) — el dominio no depende de un puerto compartido
+> ancho. El **recibo de pago al cliente no se construyó**: el ticket impreso del cobro queda como
+> costura (§7); en la práctica el comprobante lo imprime *Facturación* (FAC-06). `QrGenerator` sí
+> se cerró con adapter **EMVCo real** (`emvco-qr-generator.ts`) + uno in-memory para tests.
+
 ### 4.2 Invariantes del dominio
 
 1. **La `Order` se cobra solo si está `CLOSED`** (leída por `SalesReader`); una orden `OPEN`/
@@ -267,6 +274,35 @@ Recursos bajo el tenant autenticado (JWT + RBAC). DTOs con class-validator en el
 turno, movimientos), `cerrar_caja` (arqueo/cierre — mapea a `puede_cerrar_caja` del maestro §5),
 `cobrar` (registrar pagos / generar QR). Setup de cajas reusa `gestionar_configuracion`; listar
 reusa `vender`. Ver §11 sobre granularidad. Impresión de recibo/Z vía `PrinterPort`.
+
+### 5.bis Reconciliación con lo implementado (PAY-01..07, ago-2026)
+
+Las rutas y los tres permisos salieron **tal cual** el diseño. Lo que se decidió al construir:
+
+- **El turno del cobro se resuelve solo:** `POST /orders/:id/payments` **no** recibe `cashRegisterId`.
+  El use-case busca el turno `OPEN` **del cajero autenticado en la sucursal de la orden**
+  (`findOpenByCashier(order.branchId, userId)`); si no hay, `409 NO_OPEN_SHIFT` (invariante 6). El
+  cobro nunca abre un turno por su cuenta — «abre/usa el turno» del diseño quedó en **usa**.
+- **Idempotencia offline efectiva:** `POST` de pago/turno/movimiento con un `clientUuid` ya visto
+  **devuelve el registro existente** (no es error), que es lo que necesita la cola de sync (§6.C maestro).
+- **`GET /shifts/:id` no previsualiza el arqueo:** devuelve el turno tal cual. El arqueo se calcula
+  **al cerrar** (regla pura `computeShiftArqueo`) y ahí se persiste; una previsualización en vivo
+  («¿cuánto debería haber ahora?») queda como costura de Reportes.
+- **Abrir turno exige caja activa:** una `CashRegister` con `active=false` no opera →
+  `409 CASH_REGISTER_INACTIVE` (no estaba explícito en §4.2).
+- **`GET /cash-registers`** acepta `includeInactive` (por defecto solo activas), permiso `vender`.
+- **Arqueo por método, detalle fino:** la fila `CASH` se escribe **siempre**; un método no-efectivo
+  se omite si no tuvo pagos **ni** contado ingresado, y si se omite su `counted` **se asume igual al
+  esperado** (diferencia 0). El efectivo suma `amount`, nunca `tendered` (§6).
+- **Catálogo de errores** (`cashbox-errors.ts`): 404 `BRANCH_NOT_FOUND`, `CASH_REGISTER_NOT_FOUND`,
+  `CASH_SHIFT_NOT_FOUND`, `ORDER_NOT_FOUND`, `PAYMENT_NOT_FOUND`; 409 `CASH_REGISTER_DUPLICATE`,
+  `CASH_REGISTER_INACTIVE`, `SHIFT_ALREADY_OPEN`, `SHIFT_NOT_OPEN`, `ORDER_NOT_PAYABLE`,
+  `ORDER_ALREADY_SETTLED`, `NO_OPEN_SHIFT`, `PAYMENT_SHIFT_CLOSED`; 422
+  `SHIFT_OPENING_FLOAT_INVALID`, `PAYMENT_INVALID`, `PAYMENT_OVERPAY`, `CASH_MOVEMENT_INVALID`,
+  `PAYMENT_QR_INVALID`.
+- **El índice único parcial existe de verdad:** `cash_shift_one_open_per_register` en SQL crudo
+  (`WHERE "status" = 'OPEN'`, migración `pay02`), porque Prisma no modela índices parciales; el
+  chequeo aplicativo es la primera capa y el índice el backstop de la carrera (patrón SAL-08).
 
 ---
 
@@ -368,3 +404,26 @@ módulo `cashbox` y prefijo `PAY`.
 4. **QR Yape/Plin (PAY-07) entra al MVP:** generación local EMVCo + confirmación manual (§8 maestro).
 5. **Nombre de módulo `cashbox` y prefijo de HU `PAY`** adoptados (defaults; renombrables antes de
    scaffoldear si el usuario lo pide).
+
+---
+
+## 12. Estado (ago-2026): dominio Cobros y caja COMPLETO
+
+`PAY-01..07` (`ALPQ-36..42`) implementadas y pusheadas — commit único
+`1a2c7c8` en `alpaqa-pos-backend` (migraciones `pay01_cash_register`, `pay02_cash_shift`,
+`pay03_payment`, `pay05_cash_movement`, `pay06_shift_close`; RLS + GRANT en cada tabla nueva).
+El módulo `cashbox` quedó con las cinco entidades del §3, los tres permisos del §11.3 y los
+puertos `SalesReader` / `QrGenerator` / `ShiftReportPrinter`.
+
+**Se cumplió como estaba diseñado:** caja universal sin capability gate; el cobro **no muta** la
+`Order`; liquidación **derivada** (`outstanding = total − Σ amount`); un turno `OPEN` por caja
+(chequeo + índice parcial); vuelto solo en efectivo y sin sobrepago en no-efectivo; motivo
+obligatorio en los movimientos; arqueo con efectivo automático y no-efectivo manual; QR EMVCo
+local con confirmación manual.
+
+**Costuras que siguen abiertas (§7), ahora con más precisión:**
+- **Recibo de pago impreso**: no se construyó (solo el **Z** de cierre). El ticket que ve el
+  cliente lo emite *Facturación* (FAC-06).
+- **Previsualización del arqueo** de un turno abierto (Reportes).
+- Conciliación automática de tarjeta/billeteras, pasarela de pago, propinas y sync offline siguen
+  como estaban.
