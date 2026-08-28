@@ -187,6 +187,13 @@ Todas las tablas son **tenant** (`companyId` + RLS en dos capas, invariante 4 / 
 `CreditNoteReason {ANULACION, DEVOLUCION, CORRECCION}`.
 `IgvAffectation` se reusa del catálogo (snapshot).
 
+> **Reconciliado (FAC-05):** `ComprobanteType` quedó con **tres** valores —
+> `{BOLETA, FACTURA, NOTA_CREDITO}`. La nota de crédito no inventa su numeración: usa una
+> `ComprobanteSeries` **de tipo `NOTA_CREDITO`** anclada a la misma caja, con el mismo mecanismo de
+> correlativo atómico. Por eso `CreditNote` lleva `seriesId` (FK a la serie, no estaba en §3.3) y su
+> propio único `(companyId, series, correlative)`. `NOTA_CREDITO` es **solo tipo de serie**: emitir
+> un comprobante con ese tipo se rechaza (`COMPROBANTE_TYPE_INVALID`).
+
 ### 3.6 Índices clave
 
 - `(cashRegisterId, type)` único en `ComprobanteSeries` (serie exclusiva por caja); `(companyId, series)` único.
@@ -209,6 +216,20 @@ Todas las tablas son **tenant** (`companyId` + RLS en dos capas, invariante 4 / 
 | **`OrderReader`** (nuevo) | lee la `Order` **cerrada** (líneas snapshot, IGV, totales) y su **liquidación** (por Cobros) para construir el comprobante. Cross-context de **solo lectura** confinado a infraestructura (patrón `SalesReader` de PAY-03). |
 | **`CashRegisterReader`** (nuevo) | valida la caja que ancla la serie (existe/activa). Solo lectura. |
 | **`PrinterPort`** (existente) | ticket térmico del comprobante; adapter ESC/POS stub, **nunca tumba** la emisión si el hardware falla (patrón SAL-09/PAY-06). |
+
+> **Reconciliado (ago-2026):** los tres puertos nuevos se construyeron como estaban diseñados
+> (`PsePort` con `stub-pse-port.ts`, `OrderReader`, `CashRegisterReader`), y aparecieron **dos más**
+> que el diseño no había separado:
+> - **`ComprobantePrinter`** — puerto propio y estrecho en vez de un `PrinterPort` compartido
+>   (misma decisión que `ShiftReportPrinter` en PAY-06); adapter ESC/POS stub. El ticket se imprime
+>   **al entregar** (FAC-06), no al emitir, y es best-effort.
+> - **`ComprobanteDelivery`** — entrega por correo/enlace, intercambiable, con adapter stub que
+>   simula el envío y devuelve un link.
+>
+> `OrderReader` resultó más ancho de lo previsto: además de las líneas y el total, devuelve
+> `paidTotal` (Σ pagos, para verificar la liquidación) y **`cashRegisterId`** — la caja se resuelve
+> siguiendo la cadena **pago → turno → caja**, y es lo que elige la serie. Si no se puede resolver,
+> la orden no es facturable.
 
 ### 4.2 Invariantes del dominio
 
@@ -276,6 +297,27 @@ Recursos bajo el tenant autenticado (JWT + RBAC). DTOs con class-validator en el
 **Permisos RBAC nuevos:** `emitir_comprobante` (emitir/enviar/nota de crédito). Setup de series
 reusa `gestionar_configuracion`; captura de cliente reusa `cobrar`/`vender`. Impresión vía
 `PrinterPort`.
+
+### 5.bis Reconciliación con lo implementado (FAC-01..06, ago-2026)
+
+- **Consulta por orden:** quedó como sub-recurso `GET /orders/:orderId/comprobante` (uno por orden),
+  no `GET /comprobantes?orderId=`. Se agregó `GET /comprobantes/:id/credit-notes`.
+- **Emitir acepta solo `customerId?`** (cliente ya registrado con FAC-02). No hay `customerDoc?`
+  inline: sin `customerId`, la **boleta** sale a público con `SIN_DOCUMENTO`; la **factura** sin
+  cliente con RUC → 422 (`COMPROBANTE_CUSTOMER_INVALID`).
+- **Permisos finales:** todo el ciclo del comprobante (emitir, enviar, consultar, nota de crédito,
+  entregar, PDF/XML) va con `emitir_comprobante`; series (incluido el `GET`) con
+  `gestionar_configuracion`; clientes con `cobrar` (alta) y `vender` (búsqueda).
+- **`GET /comprobantes/:id/pdf` devuelve texto plano** (`text/plain`, `renderComprobanteText`), no un
+  PDF gráfico: la ruta queda **estable** y el render real llega con el PSE/renderer (costura §7).
+  `GET /xml` sirve el XML que devolvió el PSE, o 409 `COMPROBANTE_XML_NOT_AVAILABLE` si aún no hay.
+- **Catálogo de errores** (`billing-errors.ts`): 404 `CASH_REGISTER_NOT_FOUND`,
+  `COMPROBANTE_SERIES_NOT_FOUND`, `ORDER_NOT_FOUND`, `CUSTOMER_NOT_FOUND`, `COMPROBANTE_NOT_FOUND`;
+  409 `CASH_REGISTER_INACTIVE`, `SERIES_ALREADY_ASSIGNED`, `SERIES_DUPLICATE`, `CUSTOMER_DUPLICATE`,
+  `ORDER_NOT_INVOICEABLE`, `ORDER_ALREADY_INVOICED`, `NO_SERIES_FOR_REGISTER`,
+  `COMPROBANTE_NOT_SENDABLE`, `CREDIT_NOTE_NOT_ISSUABLE`, `NO_CREDIT_NOTE_SERIES`,
+  `COMPROBANTE_XML_NOT_AVAILABLE`; 422 `SERIES_INVALID`, `CUSTOMER_INVALID`,
+  `COMPROBANTE_CUSTOMER_INVALID`, `COMPROBANTE_TYPE_INVALID`.
 
 ---
 
@@ -360,5 +402,53 @@ commit sin coautoría → push → mover el ticket en Jira).
    credenciales) se cablea después sin rediseñar. No se genera XML firmado propio.
 3. **Cola de contingencia offline = costura:** el estado `GENERADO` + el ciclo `sunatStatus` quedan
    listos; la cola/reintento la construye el dominio **Sincronización** (PRD propio), no Facturación.
-4. Pendiente de decisión al llegar a la HU: el **permiso** exacto de la nota de crédito por anulación
-   (`emitir_comprobante` vs `anular_venta`), y la elección concreta del **PSE** para el adapter real.
+4. ~~Pendiente: el **permiso** exacto de la nota de crédito por anulación~~ → **resuelto al
+   implementar FAC-05: `emitir_comprobante`**, sin distinguir el motivo. Razón: la nota de crédito es
+   un **acto fiscal numerado** (consume correlativo de una serie), no la anulación operativa de una
+   venta — esa es `anular_venta` y vive en *Ventas* (SAL-04, sobre orden abierta). Quien puede quemar
+   un número fiscal es quien factura.
+5. Sigue pendiente: la elección concreta del **PSE** para el adapter real (Nubefact/Bizlinks) y sus
+   credenciales. El stub cierra el flujo del MVP sin bloquear.
+
+---
+
+## 12. Estado (ago-2026): dominio Facturación electrónica COMPLETO
+
+`FAC-01..06` (`ALPQ-44..49`) implementadas, en Jira **Listo**, un commit por HU: `2773651` (serie
+exclusiva por caja), `f08fc80` (`Customer`), `efed76b` (emitir), `4abbad2` (envío PSE), `5bad76a`
+(nota de crédito), `20793aa` (entrega + ticket). Migraciones `fac01_comprobante_series`,
+`fac02_customer`, `fac03_comprobante`, `fac05_credit_note`, con RLS + GRANT en cada tabla nueva.
+
+**Se cumplió como estaba diseñado:** serie exclusiva por caja; correlativo **sin huecos** asignado
+local al emitir (incremento atómico de `currentCorrelative` dentro de la transacción de emisión);
+snapshot inmutable (tras emitir solo cambian `sunatStatus`/`xml`/`cdr`/`deliveredTo`); se emite solo
+de orden `CLOSED` + liquidada y **una vez** por orden; factura exige RUC y boleta admite público;
+la nota de crédito **rinde** el número con su propia serie; `PsePort` con stub intercambiable y sin
+XML propio.
+
+**Cómo quedó el desglose de IGV (FAC-03).** Regla pura `computeComprobanteBreakdown`: el precio de
+venta **incluye** IGV, con tasa **18% fija** (`lineSubtotal = lineTotal / 1.18` a 2 decimales,
+`lineIgv = lineTotal − lineSubtotal`, para que Σ líneas cuadre exacto con el total que cobró Caja);
+exonerado/inafecto van con `lineIgv = 0`. Esto **cierra la deuda «desglose de IGV»** que *Ventas*
+había dejado registrada.
+
+**Deudas nuevas, descubiertas al implementar (no estaban en §7):**
+1. **ICBPER quedó en 0.** El invariante 7 no se pudo cumplir: la `Order` no snapshotea el flag de
+   bolsa ni la tasa ICBPER, así que `ComprobanteItem.icbperAmount` es siempre `null` y
+   `Comprobante.otrosTributos` siempre 0. La columna y el campo ya existen — falta llevar el dato
+   desde catálogo hasta la línea de la orden.
+2. **Descuentos a nivel de orden (SAL-03) no son facturables.** Si `Σ lineTotal ≠ order.total` la
+   emisión se **rechaza** (`ORDER_NOT_INVOICEABLE`) en vez de falsear el IGV. Falta **prorratear el
+   descuento por línea** antes de desglosar. Es la deuda más dura del dominio: hoy una orden con
+   descuento global no se puede facturar.
+3. **`ENVIADO` no se usa en el MVP.** El stub síncrono va de `GENERADO` directo a
+   `ACEPTADO`/`RECHAZADO`; `ENVIADO` es el estado intermedio que estrenará la **cola de contingencia**
+   de *Sincronización*. Reenviar solo se permite desde `GENERADO` o `RECHAZADO` (`canSendToSunat`).
+4. **Nuevo RUS:** no hay flag de régimen en `Company`; el desglose se **guarda siempre** y no
+   mostrarlo queda como asunto de presentación (fase 2).
+5. **Un comprobante por orden es chequeo aplicativo** (`ORDER_ALREADY_INVOICED`), no índice único:
+   `Comprobante.orderId` solo tiene `@@index`. Si se quiere el backstop duro contra carreras, falta
+   el único parcial.
+
+**Deuda heredada que sigue abierta:** el **tope acumulado de devolución** (SAL-06) — `CreditNote` no
+modela importes, así que no valida cuánto se ha devuelto en total contra el comprobante original.
