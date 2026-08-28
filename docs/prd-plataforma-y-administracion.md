@@ -131,11 +131,14 @@ está en producción de todos los dominios. Aquí se documenta **lo que ya hay**
   antes de operar sobre ella, así que desactivarla la saca de los listados de administración pero
   **no bloquea la operación** en curso. Es deliberado —esta HU no toca otros módulos— pero conviene
   no llamarlo "cerrar una sucursal" hasta que esos dominios lo respeten. Costura registrada en §7.
-- **CAMBIO extra (ADM-04): único `(companyId, name)`.** No estaba en el plan; se agregó por el mismo
-  criterio que `rol(empresa_id, nombre)` y `caja(sucursal_id, nombre)`: dos sucursales "Principal"
-  en la misma empresa vuelven ambigua cualquier búsqueda por nombre —incluida la que usa el propio
-  alta de empresa— y el chequeo aplicativo sin índice deja la carrera abierta. Se verificó que no
-  hubiera duplicados preexistentes antes de crear el índice.
+- **CAMBIO extra (ADM-04): único `(companyId, name)`.** No estaba en el plan; se agregó por analogía
+  con `rol(empresa_id, nombre)` y `caja(sucursal_id, nombre)`. La razón concreta es que el propio
+  ADM-04 busca por nombre para detectar duplicados (`findByName`), y sin unicidad esa búsqueda es
+  ambigua. *(La versión anterior de este párrafo decía que también afectaba «la búsqueda que usa el
+  alta de empresa»; es falso: el alta **crea** la sucursal, no la busca.)* El índice es además el
+  backstop real de la carrera: el adapter traduce su `P2002` a `409 BRANCH_DUPLICATE`, no a un 500.
+  **Ojo con el deploy:** la migración crea el índice sin desduplicar, así que en una base con
+  nombres repetidos **falla ruidosamente**, a propósito — preferible a renombrar filas en silencio.
 
 ### 3.3 Usuario (existente + CAMBIO estructural)
 
@@ -239,11 +242,16 @@ función `SECURITY DEFINER` del alta (§3.3).
    porque no puede entrar a devolverle permisos a nadie. **ADM-06 debe extender la misma regla** a
    desactivar un usuario y a reasignar sus roles: son los otros dos caminos al lockout, y hoy no
    existen como endpoint.
-   **Límite conocido:** la comprobación y la escritura no son atómicas. Dos ediciones simultáneas
-   que quiten el permiso a dos roles administradores distintos podrían ver, cada una, que "queda
-   otro" y dejar la empresa en cero. La base no tiene forma de expresar "al menos una fila con este
-   permiso" como constraint; cerrarlo exigiría serializar la transacción. Se acepta el riesgo (dos
-   administradores renunciando a la vez, en el mismo instante) y se deja registrado.
+   **Límite conocido (precisado en la auditoría):** no hay una unidad de trabajo que abarque la
+   comprobación y la escritura. Cada llamada al repositorio abre **su propia transacción**
+   (`PrismaService.withTenant` → `$transaction`), así que leer el rol, contar administradores y
+   escribir son tres transacciones distintas: no es que falte serializar una, es que todavía no
+   existe. Dos ediciones simultáneas que quiten el permiso a dos roles administradores distintos
+   podrían ver, cada una, que "queda otro" y dejar la empresa en cero. La base tampoco puede
+   expresar "al menos una fila con este permiso" como constraint. Se acepta el riesgo (dos
+   administradores renunciando en el mismo instante) y se deja registrado.
+   **Sobre-bloqueo conocido, del lado seguro:** si el único rol con el permiso lo tienen solo
+   usuarios **inactivos**, la empresa ya está sin administrador y aun así se rechaza quitárselo.
 3. **Un usuario pertenece a una sola empresa** (MVP). `POST /companies` con un usuario que ya tiene
    empresa → `409 USER_ALREADY_HAS_COMPANY`. Multi-empresa por usuario es costura (§7).
 4. **Sin empresa no hay operación:** un usuario autenticado con `companyId = null` solo puede usar
@@ -252,10 +260,15 @@ función `SECURITY DEFINER` del alta (§3.3).
 5. **Permisos válidos:** `Role.permissions ⊆` vocabulario de `permission.ts` (hoy en el **kernel de
    seguridad**, `shared/domain/security/permission.ts`). Un permiso inventado → `422 ROLE_INVALID`.
    `maxDiscountPct ∈ [0, 100]` o `null`.
-5.bis **Una sucursal activa como mínimo (ADM-04, no estaba en el plan):** desactivar la última
-   sucursal activa → `409 LAST_ACTIVE_BRANCH`. Es el mismo espíritu del anti-lockout: una empresa
-   sin sucursal no tiene dónde vender, cobrar ni inventariar, y reactivarla exigiría listarla desde
-   una superficie que ya la habría filtrado. Reactivar siempre es libre.
+5.bis ~~Una sucursal activa como mínimo~~ — **regla RETIRADA en la auditoría de ADM-04.** Se había
+   implementado un `409 LAST_ACTIVE_BRANCH` justificado en que desactivar la última sucursal sería
+   irreversible. **Es falso:** `?includeInactive=true` existe y reactivar es libre, así que la
+   operación es reversible por API en ambos sentidos. Sin esa razón queda solo la política, que
+   contradice §6 («el gate "no puede vender" es de UI, no del backend; un candado adicional sería
+   redundante y frágil») y que además no protege nada: **ningún dominio consulta `active`** (§3.2),
+   así que desactivar todas las sucursales no impide operar — solo vacía un listado de
+   administración. Cuando Ventas y Cobros respeten el flag, la regla vuelve a discutirse con un
+   invariante real que proteger.
 5.ter **Borrar un rol exige que nadie lo tenga** (`409 ROLE_IN_USE`, ADM-05): borrarlo con gente
    dentro les quitaría todos sus permisos de golpe y el puente `UserBranch` no sobrevive sin rol.
    Con esa regla, **borrar no puede provocar lockout**: si nadie lo tiene, nadie pierde
@@ -323,7 +336,9 @@ class-validator en el borde.
   es editable: es descriptiva, no la identidad fiscal.
 - **Sucursales** — `GET /branches` (`?includeInactive`), `POST /branches`, `PATCH /branches/:id`
   (renombrar / dirección / `active`). Permiso `gestionar_configuracion`.
-- **Roles** — `GET /roles`, `POST /roles`, `PATCH /roles/:id` (nombre, permisos, `maxDiscountPct`),
+- **Roles** — `GET /roles`, `POST /roles`, `PATCH /roles/:id` (nombre, permisos, `maxDiscountPct`;
+  **es un parche**: lo que no se envía se conserva, igual que en empresa y sucursales — renombrar un
+  rol no puede borrarle el tope de descuento de refilón; para quitarlo se manda `null` explícito),
   `DELETE /roles/:id` (rechazado si hay usuarios asignados o si viola anti-lockout). Permiso
   `gestionar_usuarios`. `GET /permissions` devuelve el vocabulario para que la UI arme el selector.
 - **Usuarios** — `GET /users`, `POST /users` (`{ name, email, branchId, roleId }` → responde
