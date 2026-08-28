@@ -126,6 +126,16 @@ está en producción de todos los dominios. Aquí se documenta **lo que ya hay**
   lógico**, el mismo patrón de catálogo y `CashRegister`. Hoy una sucursal no se puede dar de baja, y
   borrarla físicamente arrastraría en cascada stock, órdenes, cajas y comprobantes — inaceptable.
   Migración `adm04`: una columna con default seguro; `sucursal` ya tiene RLS desde el cimiento.
+- **Alcance real de `active` (verificado al implementar, ADM-04):** hoy **ningún otro dominio lo
+  consulta**. Ventas, Cobros, Inventario y Facturación no preguntan si la sucursal está activa
+  antes de operar sobre ella, así que desactivarla la saca de los listados de administración pero
+  **no bloquea la operación** en curso. Es deliberado —esta HU no toca otros módulos— pero conviene
+  no llamarlo "cerrar una sucursal" hasta que esos dominios lo respeten. Costura registrada en §7.
+- **CAMBIO extra (ADM-04): único `(companyId, name)`.** No estaba en el plan; se agregó por el mismo
+  criterio que `rol(empresa_id, nombre)` y `caja(sucursal_id, nombre)`: dos sucursales "Principal"
+  en la misma empresa vuelven ambigua cualquier búsqueda por nombre —incluida la que usa el propio
+  alta de empresa— y el chequeo aplicativo sin índice deja la carrera abierta. Se verificó que no
+  hubiera duplicados preexistentes antes de crear el índice.
 
 ### 3.3 Usuario (existente + CAMBIO estructural)
 
@@ -223,13 +233,33 @@ función `SECURITY DEFINER` del alta (§3.3).
    `gestionar_usuarios`** en alguna sucursal. Cubre desactivar un usuario, quitarle el rol, editar el
    rol para sacarle el permiso y borrar el rol. Es la regla más importante del dominio: violarla deja
    al negocio fuera de su propia cuenta sin recuperación posible en el MVP. → `409 LAST_ADMIN`.
+   **Implementado en ADM-05** para la única superficie que existe hoy (editar el rol): la cuenta es
+   `countAdminsOutsideRole`, que cuenta **usuarios activos**, no asignaciones — alguien con dos roles
+   en dos sucursales sigue siendo administrador por el otro, y un usuario desactivado no cuenta
+   porque no puede entrar a devolverle permisos a nadie. **ADM-06 debe extender la misma regla** a
+   desactivar un usuario y a reasignar sus roles: son los otros dos caminos al lockout, y hoy no
+   existen como endpoint.
+   **Límite conocido:** la comprobación y la escritura no son atómicas. Dos ediciones simultáneas
+   que quiten el permiso a dos roles administradores distintos podrían ver, cada una, que "queda
+   otro" y dejar la empresa en cero. La base no tiene forma de expresar "al menos una fila con este
+   permiso" como constraint; cerrarlo exigiría serializar la transacción. Se acepta el riesgo (dos
+   administradores renunciando a la vez, en el mismo instante) y se deja registrado.
 3. **Un usuario pertenece a una sola empresa** (MVP). `POST /companies` con un usuario que ya tiene
    empresa → `409 USER_ALREADY_HAS_COMPANY`. Multi-empresa por usuario es costura (§7).
 4. **Sin empresa no hay operación:** un usuario autenticado con `companyId = null` solo puede usar
    `POST /companies`, `GET /auth/me` y `POST /me/password`. Cualquier otra ruta → `403 NO_COMPANY`
    (hoy fallaría con `MissingTenantContextError`; se traduce a un error de negocio legible).
-5. **Permisos válidos:** `Role.permissions ⊆` vocabulario de `permission.ts`. Un permiso inventado →
-   `422 ROLE_INVALID`. `maxDiscountPct ∈ [0, 100]` o `null`.
+5. **Permisos válidos:** `Role.permissions ⊆` vocabulario de `permission.ts` (hoy en el **kernel de
+   seguridad**, `shared/domain/security/permission.ts`). Un permiso inventado → `422 ROLE_INVALID`.
+   `maxDiscountPct ∈ [0, 100]` o `null`.
+5.bis **Una sucursal activa como mínimo (ADM-04, no estaba en el plan):** desactivar la última
+   sucursal activa → `409 LAST_ACTIVE_BRANCH`. Es el mismo espíritu del anti-lockout: una empresa
+   sin sucursal no tiene dónde vender, cobrar ni inventariar, y reactivarla exigiría listarla desde
+   una superficie que ya la habría filtrado. Reactivar siempre es libre.
+5.ter **Borrar un rol exige que nadie lo tenga** (`409 ROLE_IN_USE`, ADM-05): borrarlo con gente
+   dentro les quitaría todos sus permisos de golpe y el puente `UserBranch` no sobrevive sin rol.
+   Con esa regla, **borrar no puede provocar lockout**: si nadie lo tiene, nadie pierde
+   `gestionar_usuarios` al borrarlo. El anti-lockout, entonces, solo hace falta al **editar**.
 6. **El rol se asigna siempre junto a una sucursal** (`UserBranch`): no existe "rol global". Asignar
    un usuario a una sucursal de otra empresa, o a un rol de otra empresa → `404`.
 7. **Capacidades coherentes con la operación en curso:** apagar `usaMesas` con mesas ocupadas o
@@ -366,6 +396,10 @@ capacidades, onboarding). `acceso_pos` / `acceso_gestion` siguen sin verificarse
 - **`regimenTributario` como enum** (hoy texto libre) y el flag de **Nuevo RUS** que Facturación
   necesita para no desglosar IGV en el documento (deuda registrada en `prd-facturacion-electronica.md`
   §12).
+- **Que los dominios operativos respeten `Branch.active`**: hoy solo filtra listados de
+  administración (§3.2). Cuando Ventas/Cobros/Inventario lo consulten, desactivar una sucursal
+  pasará de ser una señal a ser un candado — y ahí conviene revisar qué pasa con turnos y órdenes
+  abiertas de esa sucursal, igual que se hizo con las capacidades en ADM-03.
 - **Auditoría de cambios administrativos** (quién cambió qué rol y cuándo): el dominio transversal de
   Auditoría; aquí ya se registran `Clock` y usuario.
 - **2FA / verificación de email**: fase 2 (§9 maestro).
