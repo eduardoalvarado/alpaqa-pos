@@ -139,14 +139,39 @@ está en producción de todos los dominios. Aquí se documenta **lo que ya hay**
     fila con `empresa_id IS NULL` **no es visible para ningún tenant**, que es exactamente lo
     correcto: un usuario sin empresa no pertenece a nadie. No hay que relajar la política.
   - **Escritura del registro:** es una ruta **pública** y sin contexto de tenant, así que no puede
-    pasar por el cliente extendido (fallaría fail-closed con `MissingTenantContextError`). Va por el
-    camino **unscoped** que `tenant-scope` ya contempla (`isUnscoped`), igual que hoy el login usa
-    las funciones `SECURITY DEFINER` `auth_lookup_by_email`/`auth_lookup_by_id`.
+    pasar por el cliente extendido (fallaría fail-closed con `MissingTenantContextError`).
+    **Corregido al implementar (ADM-01):** el camino `unscoped` de `tenant-scope` **no alcanza** —
+    solo salta el filtro de Prisma, y la RLS es una capa aparte: la política de `usuario` tiene
+    `WITH CHECK` y `FORCE`, así que Postgres rechaza igual un `INSERT` con `empresa_id NULL` (la
+    comparación con NULL nunca es verdadera). Se resuelve como el login: una función
+    **`SECURITY DEFINER`** propia de superficie mínima, `auth_register_user(name, email, hash)`,
+    con `empresa_id NULL` y `activo` **fijos en el SQL** (no parametrizables), `REVOKE ALL FROM
+    PUBLIC` y `GRANT EXECUTE` solo al rol de app, que sigue **sin `BYPASSRLS`**.
+  - **Dueño de la función y `FORCE RLS`:** `FORCE ROW LEVEL SECURITY` aplica la política **también
+    al dueño de la tabla**, salvo que sea superusuario — cierto en desarrollo, no garantizable en
+    un despliegue. Para que el registro no dependa de eso, `adm01` agrega una política
+    `registration_orphan_rows` acotada a `CURRENT_USER` (el rol que corre las migraciones) que
+    permite insertar y releer **solo** filas con `empresa_id IS NULL` (`FOR ALL`, porque el
+    `RETURNING` del `INSERT` pasa por la política de `SELECT`). El rol de app **no** la recibe:
+    para un tenant las filas huérfanas siguen siendo invisibles, y eso está **probado** en el e2e
+    consultando con el rol de app y una empresa activa.
+  - **Unicidad de email case-insensitive:** `adm01` agrega el índice funcional
+    `usuario_email_lower_key` sobre `lower(email)` — el índice de Prisma es sobre el valor crudo.
+    Es la garantía dura del invariante 9 y, además, el *conflict target* del alta: el
+    `ON CONFLICT DO NOTHING` devuelve cero filas en vez de lanzar `23505`, así que el email tomado
+    se resuelve **atómicamente en la base**, sin carrera entre comprobar y crear.
   - **Login:** `auth_lookup_by_email` ya devuelve `empresa_id` tal cual; para este usuario vendrá
     `NULL` y **no hay que tocar la función**.
   - **Token:** `AuthenticatedUser.companyId` y los claims JWT pasan a `string | null`. El
     `TenantInterceptor` **ya** maneja ese caso: si no hay `companyId`, no abre contexto y tocar
-    cualquier modelo de tenant falla fail-closed. El comportamiento deseado ya está construido.
+    cualquier modelo de tenant falla fail-closed.
+    **Corregido al implementar (ADM-01):** eso no basta para responder `403 NO_COMPANY`. Los
+    interceptores corren **después** de los guards, y un usuario sin empresa tampoco tiene
+    permisos, así que el `PermissionsGuard` lo cortaba antes con un genérico "permisos
+    insuficientes" — cierto pero inútil: lo que le falta no es un permiso, es crear su negocio. El
+    corte vive en un guard propio, `CompanyContextGuard`, registrado en `AuthModule` **entre**
+    `JwtAuthGuard` y `PermissionsGuard` (el orden dentro del arreglo de providers de un módulo sí
+    es determinista; entre módulos dependería del orden de importación).
   - Migración `adm01`: `ALTER COLUMN empresa_id DROP NOT NULL` (+ el FK sigue igual).
 
 **`Role`** (`@@map("rol")`) — `companyId`, `name`, `permissions` (`text[]`), `maxDiscountPct`
@@ -160,7 +185,10 @@ roles (así lo agrega hoy `auth_lookup_by_email`).
 ### 3.4 Sin tablas nuevas
 
 No hay entidad `Onboarding` (decisión §11.2: estado **derivado**) ni `Plan` (§11.4: Backoffice).
-El dominio completo se implementa con **dos migraciones de una columna cada una** (`adm01`, `adm04`).
+El dominio completo se implementa con **dos migraciones sin tablas nuevas** (`adm01`, `adm04`).
+`adm04` sí es de una sola columna (`sucursal.activo`); `adm01` resultó más ancha de lo previsto —
+además del `DROP NOT NULL` lleva el índice funcional de email, la política acotada al owner y la
+función `SECURITY DEFINER` del alta (§3.3).
 
 ---
 
@@ -172,7 +200,7 @@ El dominio completo se implementa con **dos migraciones de una columna cada una*
 |---|---|
 | **`PasswordHasher`** (existente, de `auth`) | hash de la contraseña al registrar (ADM-01), al crear un empleado con contraseña temporal (ADM-06) y al cambiarla (ADM-07). **No se duplica** el hasher. |
 | **`TokenService`** (existente, de `auth`) | reemitir el par de tokens al crear la empresa (ADM-02), cuando el `companyId` del usuario cambia de `null` a real. |
-| **`Clock`** / **`IdGenerator`** | timestamps e ids. |
+| **`Clock`** / **`IdGenerator`** | timestamps e ids. **Nota (ADM-01):** el registro **no** los usa — el id y los timestamps de la fila los pone el SQL de `auth_register_user` (`gen_random_uuid()`/`now()`), porque el alta va por función. Entran cuando el dominio cree filas por el ORM (ADM-02 en adelante). |
 | **`TemporaryPasswordGenerator`** (nuevo) | genera la contraseña temporal legible del alta de empleado (ADM-06). Puerto propio y estrecho para poder fijarla en los tests. |
 | **`OnboardingProbe`** (nuevo, ×3) | lectura de otros dominios para el checklist (ADM-08): ¿hay al menos una **caja** (cashbox)? ¿una **serie** por caja (billing)? ¿un **producto vendible** (catalog)? Solo lectura, confinado a infraestructura (patrón `SalesReader`/`OrderReader`). Se prefieren tres puertos pequeños y explícitos a uno genérico que se vuelva un cajón de sastre. |
 
@@ -279,6 +307,12 @@ capacidades, onboarding). `acceso_pos` / `acceso_gestion` siguen sin verificarse
   MVP no necesita. La invitación por correo queda como costura.
 - **`admin` reusa los puertos de `auth`, no los reimplementa.** Hashing y firma de tokens tienen un
   solo dueño. La frontera es de comportamiento (autenticar vs administrar), no de tabla.
+- **Contraseña mínima de 8 caracteres (ADM-01).** Ni el PRD maestro ni los lineamientos fijaban
+  política de contraseñas; se adopta ese piso como default razonable, declarado en el dominio
+  (`MIN_PASSWORD_LENGTH`) y reusado por el DTO, de modo que el borde y la regla no se contradigan.
+  En la práctica el `ValidationPipe` responde **400** antes de llegar al dominio; la validación de
+  dominio queda como defensa en profundidad para quien llame al caso de uso sin pasar por HTTP.
+  Endurecerla (longitud, complejidad, contraseñas filtradas) es fase 2.
 - **Anti-lockout como invariante de dominio, no como validación de UI.** Se verifica en el use-case,
   con test propio, porque es el único error del dominio que **no tiene recuperación** para el usuario.
 - **Los roles semilla se crean, no se hardcodean.** `POST /companies` crea el rol "dueño" como
