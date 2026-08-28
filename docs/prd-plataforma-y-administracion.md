@@ -155,6 +155,16 @@ está en producción de todos los dominios. Aquí se documenta **lo que ya hay**
     `RETURNING` del `INSERT` pasa por la política de `SELECT`). El rol de app **no** la recibe:
     para un tenant las filas huérfanas siguen siendo invisibles, y eso está **probado** en el e2e
     consultando con el rol de app y una empresa activa.
+  - **Cómo escribe el alta de la empresa (ADM-02):** el id se genera **antes** (`IdGenerator`),
+    así la transacción puede abrir `app.current_empresa` con el tenant que está naciendo y la RLS
+    aprueba cada INSERT sola (`empresa.id = current_setting(...)` y `empresa_id = ...` en las
+    hijas). La primitiva vive en plataforma (`PrismaService.withNewTenant`) y **falla si ya hay
+    un tenant activo**: abrir uno nuevo encima sería sombrear la empresa de la request. Por eso
+    quien ya tiene empresa se rechaza en el caso de uso, antes de llegar a la persistencia.
+    Vincular al usuario va por una segunda función `SECURITY DEFINER`
+    (`auth_attach_user_to_company`) llamada **dentro de esa misma transacción**: su fila sigue
+    huérfana y para el rol de app es invisible. Su `WHERE empresa_id IS NULL` es, además, el
+    **candado atómico** del invariante «un usuario, una empresa».
   - **Unicidad de email case-insensitive:** `adm01` agrega el índice funcional
     `usuario_email_lower_key` sobre `lower(email)` — el índice de Prisma es sobre el valor crudo.
     Es la garantía dura del invariante 9 y, además, el *conflict target* del alta: el
@@ -225,6 +235,12 @@ función `SECURITY DEFINER` del alta (§3.3).
 7. **Capacidades coherentes con la operación en curso:** apagar `usaMesas` con mesas ocupadas o
    `usaCocina` con comandas pendientes → `409 CAPABILITY_IN_USE`. Encenderlas es siempre libre.
    Apagar `controlaInventario` **no** borra stock: deja de exigirlo (§4 maestro, flag por producto).
+   **Precisado al implementar (ADM-03):** «comanda pendiente» = comanda **sin servir de una orden
+   todavía `OPEN`**. El matiz es necesario, no cosmético: anular o cerrar una orden **no**
+   transiciona sus comandas (SAL-04/05 no las tocan), así que la lectura literal —cualquier
+   comanda que no llegó a `SERVED`— dejaría la cocina trabada para siempre por una comanda
+   histórica, sin forma de destrabarla por API. «Mesa ocupada» no necesita ese matiz: `OCCUPIED`
+   ya es un estado vivo.
 8. **La empresa no se borra** desde este dominio (ni lógica ni físicamente): suspender un tenant es
    competencia de Backoffice vía `Company.estado`.
 9. **Email único global y case-insensitive** (el login ya compara con `lower(email)`). Duplicado →
@@ -264,8 +280,17 @@ class-validator en el borde.
   transacción** crea `Company` + `Branch` inicial + `Role` "dueño" (con el vocabulario completo y
   `maxDiscountPct = 100`) + `UserBranch`, y vincula al usuario. Devuelve la empresa **y un par de
   tokens nuevos** (el anterior no tiene `companyId`).
-- **Empresa** — `GET /company`, `PATCH /company` (datos fiscales), `PATCH /company/capabilities`
-  (`usaMesas`/`usaCocina`/`controlaInventario`, merge parcial). Permiso `gestionar_configuracion`.
+- **Empresa** — `GET /company`, `PATCH /company` (datos fiscales **salvo el RUC**),
+  `PATCH /company/capabilities` (`usaMesas`/`usaCocina`/`controlaInventario`, merge parcial).
+  Permiso `gestionar_configuracion`.
+  **Decidido al implementar (ADM-03): el RUC no se edita.** No porque el comprobante lo
+  snapshotee —no lo hace: `Comprobante` copia los datos del **cliente**, no los del emisor
+  (§6.D maestro)— sino **precisamente porque no lo hace**: cambiarlo reescribiría
+  retroactivamente al emisor de todo lo ya emitido ante SUNAT. Además es la identidad única
+  **global** del tenant y su unicidad no se puede verificar desde dentro del tenant (la RLS
+  hace invisible cualquier otra empresa, misma razón por la que el alta detecta el duplicado
+  por índice). Corregir un RUC mal tipeado es competencia de *Backoffice*. La `razonSocial` sí
+  es editable: es descriptiva, no la identidad fiscal.
 - **Sucursales** — `GET /branches` (`?includeInactive`), `POST /branches`, `PATCH /branches/:id`
   (renombrar / dirección / `active`). Permiso `gestionar_configuracion`.
 - **Roles** — `GET /roles`, `POST /roles`, `PATCH /roles/:id` (nombre, permisos, `maxDiscountPct`),
@@ -315,6 +340,14 @@ capacidades, onboarding). `acceso_pos` / `acceso_gestion` siguen sin verificarse
   Endurecerla (longitud, complejidad, contraseñas filtradas) es fase 2.
 - **Anti-lockout como invariante de dominio, no como validación de UI.** Se verifica en el use-case,
   con test propio, porque es el único error del dominio que **no tiene recuperación** para el usuario.
+- **Con qué nace una empresa (ADM-02):** **sin capas opcionales y controlando inventario**
+  (`usesTables: false`, `usesKitchen: false`, `tracksInventory: true`). Es el caso más común
+  (bodega/tienda) y el que menos sorprende: mesas y cocina se encienden a mano cuando el rubro
+  las pide. Ojo: el default **de la columna** en la base es `controla_inventario = false`
+  (cimiento); el alta lo fija explícitamente, no lo hereda.
+- **El rol dueño descuenta sin tope** (`maxDiscountPct = 100`). Es política de negocio —viaja
+  por el puerto como dato, junto al nombre del rol y sus permisos—, no un default de
+  persistencia.
 - **Los roles semilla se crean, no se hardcodean.** `POST /companies` crea el rol "dueño" como
   **dato**; el negocio puede renombrarlo o crear los suyos. El código nunca lo busca por nombre.
 
