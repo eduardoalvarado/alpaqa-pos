@@ -208,10 +208,12 @@ roles (así lo agrega hoy `auth_lookup_by_email`).
 ### 3.4 Sin tablas nuevas
 
 No hay entidad `Onboarding` (decisión §11.2: estado **derivado**) ni `Plan` (§11.4: Backoffice).
-El dominio completo se implementa con **dos migraciones sin tablas nuevas** (`adm01`, `adm04`).
-`adm04` sí es de una sola columna (`sucursal.activo`); `adm01` resultó más ancha de lo previsto —
-además del `DROP NOT NULL` lleva el índice funcional de email, la política acotada al owner y la
-función `SECURITY DEFINER` del alta (§3.3).
+El dominio completo se implementa **sin una sola tabla nueva**, en cuatro migraciones (no dos, como
+decía este párrafo hasta la auditoría de ADM-06): `adm01` (`empresa_id` nullable + índice funcional
+de email + política acotada al owner + función de registro), `adm02` (función que vincula al usuario
+con su empresa), `adm04` (`sucursal.activo` + único `(empresa_id, nombre)`) y `adm07` (función que
+cambia la contraseña de un usuario **sin** empresa, acotada a filas huérfanas). Las tres funciones
+son `SECURITY DEFINER` de superficie mínima, con `REVOKE`/`GRANT` en su propia migración.
 
 ---
 
@@ -255,7 +257,7 @@ función `SECURITY DEFINER` del alta (§3.3).
 3. **Un usuario pertenece a una sola empresa** (MVP). `POST /companies` con un usuario que ya tiene
    empresa → `409 USER_ALREADY_HAS_COMPANY`. Multi-empresa por usuario es costura (§7).
 4. **Sin empresa no hay operación:** un usuario autenticado con `companyId = null` solo puede usar
-   `POST /companies`, `GET /auth/me` y `POST /me/password`. Cualquier otra ruta → `403 NO_COMPANY`
+   `POST /companies`, `GET /auth/me`, `GET /me` y `POST /me/password`. Cualquier otra ruta → `403 NO_COMPANY`
    (hoy fallaría con `MissingTenantContextError`; se traduce a un error de negocio legible).
 5. **Permisos válidos:** `Role.permissions ⊆` vocabulario de `permission.ts` (hoy en el **kernel de
    seguridad**, `shared/domain/security/permission.ts`). Un permiso inventado → `422 ROLE_INVALID`.
@@ -341,12 +343,22 @@ class-validator en el borde.
   rol no puede borrarle el tope de descuento de refilón; para quitarlo se manda `null` explícito),
   `DELETE /roles/:id` (rechazado si hay usuarios asignados o si viola anti-lockout). Permiso
   `gestionar_usuarios`. `GET /permissions` devuelve el vocabulario para que la UI arme el selector.
-- **Usuarios** — `GET /users`, `POST /users` (`{ name, email, branchId, roleId }` → responde
-  `temporaryPassword` **una sola vez**), `PATCH /users/:id` (nombre, `active`),
-  `PUT /users/:id/assignments` (reemplaza sus `UserBranch`: pares sucursal+rol),
-  `POST /users/:id/reset-password` (regenera la temporal). Permiso `gestionar_usuarios`.
-- **Mi cuenta** — `GET /auth/me` (existente; pasa a incluir empresa, sucursales y permisos
-  efectivos), `POST /me/password` (`{ currentPassword, newPassword }`). Solo autenticación.
+- **Usuarios** — `GET /users`, `POST /users` (`{ name, email, assignments: [{branchId, roleId}] }`
+  → responde `temporaryPassword` **una sola vez**), `PATCH /users/:id` (nombre, `active`),
+  `PUT /users/:id/assignments` (reemplaza sus `UserBranch`), `POST /users/:id/reset-password`
+  (regenera la temporal). Permiso `gestionar_usuarios`.
+  *(El alta recibe una **lista** de asignaciones, no un par suelto: un usuario puede trabajar en
+  varias sucursales desde el día uno, y el puente ya lo soportaba.)*
+- **Mi cuenta** — `GET /me` (empresa, **sucursales asignadas** y permisos efectivos),
+  `POST /me/password` (`{ currentPassword, newPassword }`). Solo autenticación, sin permiso ni
+  empresa.
+  **Corregido al implementar (ADM-07): es `GET /me`, no un `/auth/me` enriquecido.** Y la razón
+  no es la que se dijo primero —que `auth` tendría que aprender a leer empresa y asignaciones;
+  de hecho ya las lee, por `auth_lookup_by_id`—, sino que **son dos contratos distintos**:
+  `/auth/me` devuelve lo que **afirma el token** y `/me` lo que **dice la base ahora**. La
+  diferencia se nota justo cuando importa: si a alguien le cambian el rol con la sesión abierta,
+  `/auth/me` sigue mostrando lo viejo hasta que refresque. Cambiar el contrato de `/auth/me`
+  habría roto además a sus consumidores.
 - **Onboarding** — `GET /onboarding/status` → pasos derivados con `done: boolean` y la ruta que los
   resuelve: empresa, ≥1 sucursal, ≥1 usuario, ≥1 caja, ≥1 serie de comprobante, ≥1 producto
   vendible. Permiso `gestionar_configuracion`.
@@ -418,6 +430,8 @@ capacidades, onboarding). `acceso_pos` / `acceso_gestion` siguen sin verificarse
 - **Auditoría de cambios administrativos** (quién cambió qué rol y cuándo): el dominio transversal de
   Auditoría; aquí ya se registran `Clock` y usuario.
 - **2FA / verificación de email**: fase 2 (§9 maestro).
+- **Rastro de auditoría** de las operaciones administrativas (quién dio de alta, quién desactivó,
+  quién cambió qué rol): hoy no existe (§4.3). Lo construye el dominio transversal de Auditoría.
 
 ---
 
@@ -455,7 +469,7 @@ capacidades, onboarding). `acceso_pos` / `acceso_gestion` siguen sin verificarse
 |---|---|
 | `ADM-05` | Roles CRUD + `GET /permissions`; validación `permissions ⊆` vocabulario y `maxDiscountPct ∈ [0,100]`; anti-lockout al editar/borrar |
 | `ADM-06` | Usuarios CRUD + contraseña temporal (`TemporaryPasswordGenerator`) + asignaciones sucursal/rol; anti-lockout al desactivar/reasignar |
-| `ADM-07` | Mi cuenta: `POST /me/password` y `GET /auth/me` enriquecido (empresa, sucursales, permisos efectivos) |
+| `ADM-07` | Mi cuenta: `POST /me/password` (exige la actual) y `GET /me` con empresa, sucursales y permisos efectivos leídos de la base |
 
 **Cierre del dominio:**
 | HU | Entregable |
