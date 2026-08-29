@@ -123,7 +123,16 @@ Por qué así y no de otra forma:
    encerrado.
 4. Los repositorios del backoffice **no exponen** métodos que devuelvan contenido de negocio
    (invariante-guardrail): su superficie es la que este PRD enumera y nada más.
-5. **El privilegio crece con su uso** (corregido en la auditoría de BKO-01). El rol se crea en
+5. **Dos procesos, no dos prefijos** (decidido durante BKO-01). El backoffice es un desplegable
+   aparte (`main-backoffice.ts`), no un módulo más del proceso de tenant: la credencial que puede
+   cruzar empresas no se carga en la superficie grande y expuesta. Un test enumera el router del
+   proceso de tenant y exige **cero** rutas `/backoffice`.
+6. **El entorno se separó junto con los procesos** (corregido en la auditoría de BKO-02). Separar
+   los procesos sin separar las variables no acotaba nada: el despliegue del backoffice seguía
+   obligado a llevar `DATABASE_URL` —la conexión del **owner**, que evade RLS— solo para pasar la
+   validación de arranque. Ahora hay **un perfil de validación por proceso**: cada uno exige lo
+   suyo y ninguno el del otro. Verificado arrancando ambos binarios con `.env` disjuntos.
+7. **El privilegio crece con su uso** (corregido en la auditoría de BKO-01). El rol se crea en
    BKO-01 **sin `BYPASSRLS` y con permiso solo sobre `operator_user`**: leer operadores no
    necesita más, porque esa tabla no tiene RLS. `BYPASSRLS` y el acceso a las tablas de tenant
    llegan en **BKO-03**, con el `TenantRepository` que los justifica. Concederlos antes habría
@@ -258,16 +267,24 @@ materializada, no un rediseño (§7).
 Todas bajo el prefijo **`/backoffice`**, con el guard de operador. Ninguna acepta tokens de tenant.
 
 **El default del borde importa** (corregido en la auditoría de BKO-01): una ruta bajo `/backoffice`
-sin decorar **no** queda denegada — cae en la cadena de tenant, donde un token de empresa válido
-pasa. Por eso las rutas autenticadas viven en controladores con el guard **a nivel de clase**, las
-dos anónimas (`auth/login`, `auth/refresh`) están aisladas en el suyo, y un test enumera las rutas
-del router en tiempo de ejecución para exigir que ninguna quede expuesta. Los endpoints de
-BKO-02..06 quedan cubiertos sin tocar ese test.
+sin decorar **no** queda denegada. Al separar los procesos, además, el modo de fallo cambió y
+empeoró: el proceso de backoffice no monta `AuthModule`, que es quien registra el guard global, así
+que una ruta sin decorar hoy queda **anónima** —antes la habría alcanzado un token de empresa
+válido—. Por eso las rutas autenticadas viven en controladores con `@OperatorRoute()` **a nivel de
+clase** (el decorador compuesto: separar `SkipTenantAuth` del guard permite copiar la mitad
+peligrosa), las dos anónimas (`auth/login`, `auth/refresh`) están aisladas en el suyo, y un test
+enumera las rutas del router en tiempo de ejecución para exigir que ninguna quede expuesta. Los
+endpoints de BKO-02..06 quedan cubiertos sin tocar ese test.
 
 - **Acceso** — `POST /backoffice/auth/login` (público), `POST /backoffice/auth/refresh` (público),
   `GET /backoffice/me`.
 - **Operadores** — `GET /backoffice/operators`, `POST /backoffice/operators` (alta con contraseña
   temporal, mismo patrón que ADM-06), `PATCH /backoffice/operators/:id` (nombre, `active`).
+  **Anti-lockout `LAST_OPERATOR`** (evaluado y construido en BKO-02): desactivar al último operador
+  activo devuelve 409. Es el análogo de `LAST_ADMIN` y aquí es más caro, porque no hay registro
+  público de operadores ni administrador por encima: recuperarse exige tocar la base con el rol
+  owner. No es la sobre-construcción que sí fue `LAST_ACTIVE_BRANCH` en ADM-04 —aquella se retiró
+  porque nadie leía el flag—; `active` aquí lo leen el guard y el login en cada request.
 - **Tenants** — `GET /backoffice/tenants` (listado con filtro por estado y búsqueda por RUC o razón
   social), `GET /backoffice/tenants/:id` (ficha: metadatos + plan + métricas del tenant),
   `PATCH /backoffice/tenants/:id/status` (`{ status }` → activar o suspender),
@@ -299,6 +316,10 @@ BKO-02..06 quedan cubiertos sin tocar ese test.
 - **El primer operador se siembra.** No hay registro público de operadores por la misma razón por
   la que no hay "crear super-admin" en ningún producto serio: el bootstrap es un acto de
   despliegue, no una ruta HTTP.
+- **La contraseña temporal es una capacidad de plataforma, no de un dominio.** Al ser el
+  backoffice su segundo consumidor (el primero fue ADM-06), el generador y la política de
+  contraseña se promovieron al kernel compartido en vez de duplicarse. Mismo criterio que se usó
+  con `PasswordHasher` y `TokenService`.
 - **Métricas derivadas** (§3.4), como el onboarding: se cuentan al preguntar.
 
 ---

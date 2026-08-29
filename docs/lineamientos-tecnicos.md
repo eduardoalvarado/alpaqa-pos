@@ -57,6 +57,13 @@ tenant es la superficie grande y expuesta a todos los clientes. Con un solo proc
 entrega esa conexión; con dos, la credencial no está cargada en el proceso vulnerable. Es un límite
 de privilegio, no de dominio, y por eso no contradice "sin microservicios".
 
+Separar los procesos **obliga a separar el entorno**, o el límite es decorativo: si el proceso de
+backoffice tuviera que cargar las variables del de tenant —`DATABASE_URL`, la conexión del *owner*,
+que evade RLS— solo para pasar la validación de arranque, el radio de daño seguiría abierto en la
+otra dirección. Por eso hay **un perfil de validación de entorno por proceso**: cada uno exige
+únicamente sus variables. La regla para cualquier desplegable futuro es la misma — un proceso
+aparte que igual carga las credenciales del otro no acota nada.
+
 Lo que **no** se separa, a propósito: repositorio, `schema.prisma` y migraciones. El backoffice
 modifica tablas de tenant (estado y plan de la empresa), así que el historial de migraciones tiene
 un solo dueño; dos escritores sobre una misma base es la forma clásica de romperla.
