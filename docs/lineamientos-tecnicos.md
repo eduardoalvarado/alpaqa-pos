@@ -44,7 +44,22 @@ Repos independientes, hermanos en `~/Projects/`.
 
 ### 2.2 Arquitectura: monolito modular + hexagonal pragmático
 
-Un solo desplegable, módulos por **bounded context**. No microservicios en el MVP.
+Módulos por **bounded context**, sin microservicios en el MVP.
+
+**Dos desplegables, un solo repositorio** (ago-2026, al construir el backoffice). El monolito
+modular sigue siendo la regla para los dominios de negocio: comparten proceso, esquema y
+despliegue. La excepción es el **backoffice del operador**, que corre como un proceso aparte
+(`main-backoffice.ts` + `BackofficeAppModule`) desde el mismo código.
+
+La razón **no** es acoplamiento —el módulo no importa nada de los demás— sino el **radio de daño
+de una credencial**: el backoffice usa un rol de base de datos capaz de cruzar tenants, y la API de
+tenant es la superficie grande y expuesta a todos los clientes. Con un solo proceso, un fallo ahí
+entrega esa conexión; con dos, la credencial no está cargada en el proceso vulnerable. Es un límite
+de privilegio, no de dominio, y por eso no contradice "sin microservicios".
+
+Lo que **no** se separa, a propósito: repositorio, `schema.prisma` y migraciones. El backoffice
+modifica tablas de tenant (estado y plan de la empresa), así que el historial de migraciones tiene
+un solo dueño; dos escritores sobre una misma base es la forma clásica de romperla.
 
 **Hexagonal (ports & adapters) en los dominios ricos** — facturación, órdenes/ventas,
 caja, inventario, sincronización:

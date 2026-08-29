@@ -58,7 +58,22 @@ discusión (§7).
 
 ## 2. Ubicación en la arquitectura backend
 
-Un módulo hexagonal nuevo **`backoffice`** en `alpaqa-pos-backend` (lineamientos §2.2).
+Un módulo hexagonal nuevo **`backoffice`** en `alpaqa-pos-backend` (lineamientos §2.2), que corre
+como **proceso aparte** del de tenant.
+
+**Dos desplegables, un repositorio** (decidido al construir BKO-01). `AppModule` monta los seis
+dominios de tenant; `BackofficeAppModule` monta solo este módulo más config y el shared kernel — ni
+`PlatformModule`, ni `AuthModule`, ni una sola ruta de negocio. El proceso de tenant **no carga** la
+credencial que cruza empresas, y arranca sin siquiera tener esas variables de entorno (probado en
+e2e y verificado arrancando el binario sin ellas).
+
+La razón no es acoplamiento: el módulo no importa nada de los otros dominios y nada lo importa a él.
+Es el **radio de daño de la credencial**: la API de tenant es la superficie grande y expuesta, y un
+fallo ahí no debe entregar una conexión capaz de leer todas las empresas.
+
+Lo que **no** se separa: repositorio, esquema y migraciones. Este dominio modifica tablas de tenant
+(BKO-04 cambia `empresa.estado`, BKO-05 agrega `empresa.plan_id`), así que el historial de
+migraciones tiene un solo dueño.
 
 | Módulo | Estilo | Contenido |
 |---|---|---|
