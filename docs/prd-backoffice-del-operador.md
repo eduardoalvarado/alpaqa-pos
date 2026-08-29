@@ -99,12 +99,21 @@ Por qué así y no de otra forma:
   aislamiento de todos.
 
 **Contención del riesgo (obligatorio, no opcional):**
-1. El cliente con `BYPASSRLS` se inyecta con un token propio (`BACKOFFICE_PRISMA`) y **solo** el
-   `BackofficeModule` lo declara. Ningún otro módulo puede alcanzarlo.
-2. `PrismaService` —el de siempre— no cambia: los seis módulos de tenant siguen usando el rol
+1. El cliente se inyecta con un token propio (`BACKOFFICE_PRISMA`) y **solo** el
+   `BackofficeModule` lo declara, sin exportarlo. Ningún otro módulo puede alcanzarlo por
+   accidente; hacerlo exige declararlo a mano.
+2. Una **regla de ESLint** prohíbe importar el cliente desde fuera del módulo: la contención deja
+   de depender de disciplina y pasa a fallar en el build.
+3. `PrismaService` —el de siempre— no cambia: los seis módulos de tenant siguen usando el rol
    encerrado.
-3. Los repositorios del backoffice **no exponen** métodos que devuelvan contenido de negocio
+4. Los repositorios del backoffice **no exponen** métodos que devuelvan contenido de negocio
    (invariante-guardrail): su superficie es la que este PRD enumera y nada más.
+5. **El privilegio crece con su uso** (corregido en la auditoría de BKO-01). El rol se crea en
+   BKO-01 **sin `BYPASSRLS` y con permiso solo sobre `operator_user`**: leer operadores no
+   necesita más, porque esa tabla no tiene RLS. `BYPASSRLS` y el acceso a las tablas de tenant
+   llegan en **BKO-03**, con el `TenantRepository` que los justifica. Concederlos antes habría
+   dado lectura cross-tenant de todo el contenido de negocio a un módulo cuyo único repositorio
+   lee operadores.
 
 ---
 
@@ -193,6 +202,9 @@ materializada, no un rediseño (§7).
    compartieran secreto, un token de operador —que no lleva empresa— sería indistinguible de un
    usuario recién registrado sin empresa, y entraría por las rutas marcadas `@AllowsNoCompany()`.
    Con secretos distintos, cada guard **no puede** verificar los tokens del otro mundo.
+   **Verificado al arrancar (BKO-01):** la validación de entorno exige que los cuatro secretos de
+   firma sean distintos entre sí y la app no levanta si dos coinciden. El invariante dependía de
+   que nadie copiara y pegara una variable; ahora falla ruidoso.
 3. **La conexión con `BYPASSRLS` es exclusiva de este módulo** (§2.1). Ningún caso de uso de tenant
    la alcanza.
 4. **Suspender tiene efecto.** Un tenant en `SUSPENDED` no opera: la cadena de guards corta sus
@@ -229,6 +241,13 @@ materializada, no un rediseño (§7).
 ## 5. Contrato de API (REST + OpenAPI, lineamientos §2.1/§5)
 
 Todas bajo el prefijo **`/backoffice`**, con el guard de operador. Ninguna acepta tokens de tenant.
+
+**El default del borde importa** (corregido en la auditoría de BKO-01): una ruta bajo `/backoffice`
+sin decorar **no** queda denegada — cae en la cadena de tenant, donde un token de empresa válido
+pasa. Por eso las rutas autenticadas viven en controladores con el guard **a nivel de clase**, las
+dos anónimas (`auth/login`, `auth/refresh`) están aisladas en el suyo, y un test enumera las rutas
+del router en tiempo de ejecución para exigir que ninguna quede expuesta. Los endpoints de
+BKO-02..06 quedan cubiertos sin tocar ese test.
 
 - **Acceso** — `POST /backoffice/auth/login` (público), `POST /backoffice/auth/refresh` (público),
   `GET /backoffice/me`.
@@ -302,13 +321,13 @@ Todas bajo el prefijo **`/backoffice`**, con el guard de operador. Ninguna acept
 **Acceso del operador:**
 | HU (código) | Entregable principal |
 |---|---|
-| `BKO-01` | `OperatorUser` + login/refresh propios (secreto separado, guard de operador, tabla nueva sin RLS). **Funda el módulo** y siembra el primer operador |
+| `BKO-01` | `OperatorUser` + login/refresh propios (secreto separado, guard de operador, tabla nueva sin RLS). **Funda el módulo**, crea el rol `alpaqa_backoffice` **acotado a `operator_user`** y siembra el primer operador |
 | `BKO-02` | Alta y administración de operadores (contraseña temporal, activar/desactivar) |
 
 **Tenants:**
 | HU | Entregable |
 |---|---|
-| `BKO-03` | Listado y ficha de tenants. **Estrena el rol `alpaqa_backoffice` y el cliente separado** |
+| `BKO-03` | Listado y ficha de tenants. **Amplía el rol con `BYPASSRLS` y acceso a las tablas de tenant** — el rol y el cliente ya existen desde BKO-01, pero sin privilegio |
 | `BKO-04` | `Company.estado` a enum + suspender/activar **con efecto**: guard `TENANT_SUSPENDED` en la cadena, con la excepción de la cuenta propia |
 
 **Planes y métricas:**
@@ -329,8 +348,10 @@ datos y su `estado`, el kernel de seguridad con `PasswordHasher`/`TokenService`,
 compartido y la cadena de guards donde enganchar el de suspensión.
 
 **Orden sugerido (entrar, mirar, actuar):**
-`BKO-01` (el operador puede entrar) → `BKO-02` (hay más de uno) → `BKO-03` (ve a los tenants; aquí
-aparece la segunda conexión, que es el cambio de plataforma más delicado del dominio) → `BKO-04`
+`BKO-01` (el operador puede entrar; aquí ya aparece la segunda conexión, porque el cimiento concede
+toda tabla nueva al rol de tenant por default y las credenciales de operador no pueden quedar a su
+alcance) → `BKO-02` (hay más de uno) → `BKO-03` (ve a los tenants; aquí el rol **gana el privilegio**
+de cruzar, que es el cambio más delicado del dominio) → `BKO-04`
 (puede actuar sobre ellos, y la suspensión pasa a tener efecto) → `BKO-05` (planes) → `BKO-06`
 (métricas). Cada HU con el ritual de cierre: auditoría `audit-plan` + `audit-arquitectura` → suites
 vía `test-runner` → commit sin coautoría → push → mover el ticket en Jira.
@@ -338,8 +359,8 @@ vía `test-runner` → commit sin coautoría → push → mover el ticket en Jir
 **Riesgos a vigilar:**
 - **BKO-01** introduce un segundo mundo de autenticación. El test que importa no es que el operador
   entre: es que un token de operador **no** sirva en las rutas de tenant, y viceversa.
-- **BKO-03** introduce la conexión con `BYPASSRLS`. Hay que probar que ningún módulo de tenant puede
-  alcanzarla, y que la conexión de siempre sigue fallando cerrado.
+- **BKO-03** le da `BYPASSRLS` al rol. Hay que probar que ningún módulo de tenant puede alcanzar esa
+  conexión, y que la de siempre sigue fallando cerrado.
 - **BKO-04** toca la cadena de guards, que afecta a los seis módulos: la suite completa manda.
 
 ---
