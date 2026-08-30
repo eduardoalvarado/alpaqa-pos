@@ -63,6 +63,13 @@ forma más rápida de que las reglas de negocio se bifurquen: la orden creada on
 capacidad y estado del turno, y la creada offline no. A los tres meses hay dos verdades sobre qué
 es una orden válida, y la que corre por sync es la que nadie mira.
 
+**Cómo quedó contenida (SYN-01, mejor que lo que este PRD anticipaba):** la dependencia **no**
+atraviesa el módulo. El núcleo de `sync` habla con un puerto propio (`SalesSync`) y **no sabe que
+Ventas existe**; quien lo sabe es **un único adapter** en `sync/infrastructure/sales/`. El beneficio
+no es purismo: el recorrido del lote se prueba con un doble en memoria en vez de levantar medio
+backend, y sumar Cobros (SYN-02) o Facturación (SYN-03) es agregar un puerto, no enredar el que ya
+está.
+
 **Regla del dominio:** `sync` no crea entidades. Traduce cada operación del lote a la llamada del
 caso de uso que ya la gobierna —`CreateOrderUseCase`, `RegisterPaymentUseCase`,
 `EmitComprobanteUseCase`…— y colecta el resultado. Si una regla rechaza la operación, el rechazo
@@ -136,8 +143,11 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
 
 ### 4.2 Invariantes del dominio
 
-1. **Idempotencia por `clientUuid`.** Reenviar una operación ya aplicada devuelve **el mismo
-   recurso y un resultado de éxito**, no un 409. Ojo con el efecto lateral: la idempotencia no
+1. **Idempotencia por `clientUuid` para lo que se crea, y por estado resultante para lo que
+   transiciona.** Crear es idempotente por el índice único. Cerrar y anular lo son porque el lote
+   mira el estado: si la orden ya está cerrada, el hecho que la operación describe **ya es verdad**
+   y se reporta `applied`. Sin esto, un reintento normal devolvería un rechazo y el cajero vería un
+   error por una venta que sí se registró. Reenviar una operación ya aplicada nunca da 409. Ojo con el efecto lateral: la idempotencia no
    alcanza con no duplicar la fila, tiene que no duplicar **sus consecuencias**. Ese trabajo ya
    está hecho del lado del inventario —`registerSale` es idempotente por `orderId`, así que
    reasentar una venta no descuenta stock dos veces—, y es el patrón a verificar en cada
@@ -172,8 +182,12 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
 ### Empuje
 - **`POST /sync/batch`** — cuerpo: `{ deviceId, operations: [...] }`. Cada operación lleva su
   `type`, su `clientUuid` y su carga. Respuesta: **un resultado por operación**
-  (`applied` / `duplicate` / `rejected` / `skipped`), con el id del servidor cuando aplica y el
-  código de error de dominio cuando no. **Nunca un 500 por una operación mala**: el lote responde
+  (`applied` / `rejected` / `skipped`), con el id del servidor cuando aplica y el código de error
+  de dominio cuando no. **Tres resultados, no cuatro** (corregido al construir SYN-01): se
+  evaluó distinguir `duplicate` de `applied` y se descartó — para el POS son el mismo hecho («ya
+  está, sacala de la cola») y el servidor no puede computar la diferencia sin una lectura previa
+  que además tiene ventana de carrera. Un valor del contrato que no se puede emitir con honestidad
+  es peor que no tenerlo. Responde **200**, no 201: el lote no crea *un* recurso. **Nunca un 500 por una operación mala**: el lote responde
   200 con el detalle, porque el POS necesita saber *cuál* falló, no que "algo" falló.
 
 ### Bajada
@@ -221,6 +235,28 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
 
 ---
 
+### 6.bis El alcance de SYN-01, y el hueco que dejó nombrado
+
+SYN-01 transporta **crear, cerrar y anular**. Deliberadamente **no** transporta *agregar ítem* ni
+*aplicar descuento*, y el motivo es que **hoy no se pueden reenviar sin cambiar el resultado**:
+
+- `OrderItem` **no tiene `clientUuid`**, así que agregar el mismo ítem dos veces son dos ítems — y
+  eso es correcto para una interacción, pero rompe el reenvío.
+- El descuento se aplica por un caso de uso aparte, y aplicarlo dos veces lo duplica.
+
+Encaja con el principio del lote —transporta **hechos**, no interacciones— y por eso una venta
+offline viaja como *la orden con sus líneas* más *su cierre*, no como el replay de los toques del
+cajero.
+
+**El hueco, nombrado:** un **descuento aplicado offline no puede viajar todavía**, porque el hecho
+"orden creada" no sabe expresarlo (`CreateOrderItemInput` no tiene campo de descuento, aunque
+`OrderItem.lineDiscount` exista en la base). Las dos salidas son: que la creación de orden acepte
+descuentos —lo que completa el modelo de "hecho" y mantiene todo idempotente— o darle `clientUuid`
+a `OrderItem`. **Es una decisión de Ventas, no de este dominio**, y hay que tomarla antes de que el
+POS real intente vender con descuento sin conexión.
+
+---
+
 ## 7. Costuras dejadas abiertas
 
 - **Worker aparte** para la contingencia (§2.2), si el volumen lo pide.
@@ -250,7 +286,7 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
 
 | HU | Entregable |
 |---|---|
-| `SYN-01` | Módulo `sync` + `POST /sync/batch` con órdenes e ítems: orden de dependencia, resultado por operación, idempotencia verificada por reenvío del mismo lote |
+| `SYN-01` | Módulo `sync` + `POST /sync/batch` con `CREATE_ORDER` / `CLOSE_ORDER` / `CANCEL_ORDER`: orden de dependencia, resultado por operación, idempotencia verificada por reenvío del mismo lote contra la BD real |
 | `SYN-02` | El lote acepta caja: turnos, pagos y movimientos (delegando en Cobros) |
 | `SYN-03` | El lote acepta comprobantes y notas, respetando el correlativo del dispositivo y avanzando el high-water mark |
 | `SYN-04` | `GET /sync/working-set`: catálogo de la sucursal, mesas y turno abierto, con `since` |
