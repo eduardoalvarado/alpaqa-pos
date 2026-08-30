@@ -261,6 +261,8 @@ Estas cuatro definen la solidez del modelo. Mal diseñadas al inicio, son caras 
 ### C. IDs para sincronización
 Todo lo creable offline (órdenes, pagos, movimientos de caja) usa **UUID generado en el cliente**, no autoincremental del servidor. Garantiza que dos dispositivos no colisionen y que la sincronización sea idempotente.
 
+**La idempotencia tiene que cubrir las consecuencias, no solo la fila.** No alcanza con que reenviar una orden no cree dos órdenes: tiene que no descontar el stock dos veces, no consumir dos correlativos, no asentar dos movimientos de caja. Cada efecto que una operación dispara necesita su propia clave de idempotencia — el descuento de inventario, por ejemplo, se acota por `orderId`, no por el UUID de la operación. Es el criterio a verificar en cada consecuencia nueva que se agregue, no algo que se herede por usar UUID de cliente.
+
 ### D. Snapshot en el comprobante
 El `Comprobante` guarda sus propios totales, desglose de IGV y datos del cliente al momento de emisión. No los recalcula leyendo la orden: una vez emitido, es inmutable.
 

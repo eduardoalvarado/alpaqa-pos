@@ -98,6 +98,20 @@ src/modules/<contexto>/
   (`*.controller.ts` + `*.dto.ts` con class-validator en el borde), clientes externos.
   El dinero cruza siempre como `Money`, nunca `number`.
 
+**Los guards corren ANTES que los interceptores** (Nest). Consecuencia práctica y no obvia: cuando
+un guard se ejecuta, el `TenantInterceptor` **todavía no fijó** `app.current_empresa`, así que la
+RLS devuelve 0 filas para cualquier tabla de tenant. **Un guard que necesite leer la base no puede
+usar el modelo Prisma**: va por una función `SECURITY DEFINER` de superficie mínima, como hace el
+login. Se descubrió construyendo el guard de suspensión (BKO-04) y volverá a aparecer cada vez que
+un dominio agregue un guard con lectura.
+
+**El orden de los `APP_GUARD` es portante y se fija con un test.** La cadena vigente es: autenticar
+→ exigir empresa → cortar si el tenant está suspendido → autorizar por permiso. Cada eslabón existe
+para que el rechazo **diga la verdad**: a un suspendido le sobran los permisos, así que dejarlo
+llegar al guard de permisos le daría un 403 por el motivo equivocado. Registrar un eslabón en el
+módulo equivocado lo puede dejar corriendo antes de que exista `request.user`, o sea muerto y en
+silencio.
+
 ### 2.3 Puertos (seams) obligatorios desde el día uno
 
 El PRD los exige; se modelan como interfaces del dominio con adapters intercambiables:
@@ -111,12 +125,68 @@ El PRD los exige; se modelan como interfaces del dominio con adapters intercambi
 | `Clock` | Tiempo inyectable (timestamps, testabilidad) | §9.bis (datos ricos) |
 | `PrinterPort` | Abstracción de impresión ESC/POS (vive del lado POS) | §4.bis |
 
-### 2.4 Multi-tenancy (crítico — maneja dinero)
+### 2.4 Multi-tenancy y modelo de privilegios (crítico — maneja dinero)
 
 Aislamiento por tenant en **dos capas**:
 1. Filtro `empresa_id` automático vía extensión/middleware de Prisma (nunca a mano).
 2. **Postgres Row-Level Security (RLS)** como defensa en profundidad: un `WHERE`
    olvidado no puede filtrar datos entre negocios.
+
+Lo que sigue se aprendió construyendo, y varias de estas reglas se descubrieron **repitiendo el
+error**. Se consultan **antes de escribir una migración o un guard**, no después.
+
+#### El privilegio crece con su uso
+
+Un rol recibe **solo lo que la HU en curso necesita**, y se amplía en la HU que lo justifica. Nunca
+"por simetría" ni "ya que estamos". Concederle a un rol acceso a tablas que ningún repositorio lee
+convierte una garantía de la base en una promesa sobre la buena conducta del código.
+
+- **`GRANT` por columna cuando la columna tiene dueño.** Si una columna la gobierna otro actor —el
+  estado comercial de una empresa lo fija el operador, no el dueño—, el grant se acota a las
+  columnas correspondientes y se revoca el de tabla. Un `GRANT UPDATE` de tabla hace que "el
+  repositorio escribe campo por campo" sea la única defensa, y un `data: { ...patch }` futuro la
+  borra en silencio.
+- **Políticas RLS nominales (`TO <rol>`) en vez de `BYPASSRLS`.** `BYPASSRLS` es un atributo del
+  rol **entero y permanente**: cubre toda tabla, hoy y futura. Una política nominal abre exactamente
+  una tabla para exactamente un rol. Se necesitan **dos llaves**: el `GRANT` (sin él la consulta no
+  corre) y la política (sin ella corre y devuelve 0 filas). Conviene probar **cada una por
+  separado**: quitar una y ver la suite en rojo es lo que distingue una garantía de una suposición.
+- **Para leer agregados cross-tenant, función que devuelve el agregado — no `GRANT` sobre la
+  tabla.** Contar filas no requiere poder leerlas. Una función `SECURITY DEFINER` que devuelve solo
+  `count(*)` deja el techo puesto por Postgres; un `GRANT SELECT` lo deja puesto por qué métodos
+  tiene el repositorio.
+
+#### Funciones `SECURITY DEFINER`: el requisito de despliegue que no es obvio
+
+Se usan cuando hace falta leer **antes de que exista contexto de tenant** (el login, un guard) o
+para exponer un agregado sin conceder la tabla. Reglas:
+
+- **Superficie mínima**: devuelven las columnas justas, nunca `SELECT *` de una tabla de negocio.
+- `SET search_path = public, pg_temp` — **con `pg_temp` explícito**: si no se nombra, Postgres lo
+  busca *antes* que los esquemas listados y un caller con privilegio `TEMP` puede anteponer una
+  tabla suya.
+- `REVOKE ALL ... FROM PUBLIC` **siempre**: Postgres concede `EXECUTE` a `PUBLIC` por defecto.
+- **El dueño de la función debe ser superusuario o tener `BYPASSRLS`.** Las tablas del cimiento
+  tienen `FORCE ROW LEVEL SECURITY`, y con `FORCE` la RLS alcanza **también al dueño de la tabla**:
+  ser owner **no** basta. Si el dueño no es exento, las funciones **no fallan: devuelven vacío** —
+  nadie puede iniciar sesión, sin decir por qué, y los agregados dan ceros verosímiles. En
+  desarrollo no se nota porque el owner del contenedor es superusuario. Los dos procesos verifican
+  esto **al arrancar** y se niegan a levantar si no se cumple.
+
+#### Trampas verificadas
+
+- **Prisma materializa los defaults del esquema del lado del cliente.** Un `@default(...)` de
+  `schema.prisma` viaja **nombrado** en el `INSERT`. Consecuencia: un `GRANT INSERT (columnas)` debe
+  incluir toda columna con default declarado en el esquema, o la escritura falla con `permission
+  denied`. (Postgres, por su parte, **no** pide privilegio sobre una columna realmente *omitida*.)
+  Si lo que se quiere es que el cliente no **elija** el valor, la herramienta correcta no es el
+  grant sino una política `AS RESTRICTIVE ... WITH CHECK`.
+- **El conjunto de modelos legibles sin acotar por tenant no es "los que no tienen `empresa_id`".**
+  Es **"los que el lado del tenant tiene que leer"**. Son preguntas distintas: hay tablas de
+  plataforma sin `empresa_id` que el tenant no debe tocar, y dejarlas fuera hace que el cliente
+  falle cerrado si alguien las consulta. Agregar una "por simetría" abre esa puerta.
+- **Discriminar `P2002` por `meta.target` no es confiable** con el driver adapter: vuelve
+  `undefined`. Acotar el `try/catch` a la sentencia que puede chocar, en vez de inferir del mensaje.
 
 ### 2.5 Invariantes del cimiento (del PRD §6) que el código debe garantizar
 
@@ -127,6 +197,31 @@ Aislamiento por tenant en **dos capas**:
 - **UUID cliente** para todo lo creable offline (órdenes, pagos, movimientos de caja).
 - **Dos ejes ortogonales**: `Empresa.capacidades` (operativo) vs. `Plan.features`
   (comercial). Sistemas de flags separados.
+
+---
+
+### 2.6 Disciplina de pruebas del backend
+
+- **Unit y e2e separados.** Unit sin base; e2e contra Postgres real. Las suites se corren
+  delegando en el sub-agente `test-runner`, con reintento para distinguir fallo real de flaky.
+- **`nest build` no compila los specs.** Un error de tipos en un `.spec.ts` pasa desapercibido con
+  Jest en verde: **correr `tsc --noEmit` antes de cerrar una HU**.
+- **Aislamiento entre suites e2e.** Jest corre los archivos **en paralelo contra la misma base**:
+  - Cada suite usa **sus propios RUC**. `createCompany` hace `upsert` por RUC y varias suites borran
+    su empresa en `afterAll`, así que compartir uno hace que una le arranque la fila a otra a mitad
+    de corrida. El síntoma aparece en una suite **sin relación** con la culpable, y es facilísimo
+    archivarlo como flaky. Lo fija `ruc-unico.e2e-spec`.
+  - Una regla que abarca **toda una tabla global** (p. ej. "no dejar cero operadores activos") no se
+    puede aislar por datos: exige un **lock consultivo de Postgres** (`lockOperatorTable`), que
+    serializa solo a las suites que la tocan.
+  - **Antes de archivar un e2e como flaky, buscar fixtures compartidos entre archivos.**
+- **Mutation-testing de cada garantía nueva.** Un test verde no prueba nada por sí solo: hay que
+  saber **qué habría que romper para ponerlo rojo** — y romperlo. Vale sobre todo para lo que se
+  verifica contra la base (quitar un `GRANT`, una política, el filtro por empresa) y para cualquier
+  aserción que "fija" un invariante. En este proyecto ese ejercicio encontró varias pruebas que
+  **no podían fallar** por el motivo que declaraban.
+- **Verificar una justificación ejecutándola, no leyéndola.** Antes de escribir "esto se recupera
+  con X", correr X.
 
 ---
 

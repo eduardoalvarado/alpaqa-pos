@@ -35,6 +35,31 @@
 4. **El cimiento también se rastrea** (épica `ALPQ-15`), no solo las HUs de negocio.
 5. Al cambiar el estado, dejar (si aporta) un comentario breve en el issue con el commit/PR.
 
+## Ritual de cierre de una HU
+
+Cada HU se cierra con la misma secuencia, y el orden importa: las auditorías corren **contra el PRD
+ya reconciliado**, para que contrasten con la decisión vigente y no con la anterior.
+
+1. **Implementar** leyendo antes `lineamientos-tecnicos.md` (§2.2 arquitectura, §2.4 privilegios,
+   §2.6 pruebas) y el PRD del dominio.
+2. **Mutation-testing de cada garantía nueva**: romper lo que el test dice fijar y comprobar que se
+   pone rojo. No una muestra — cada garantía.
+3. **Reconciliar el PRD del dominio** con lo que realmente se construyó, incluidas las desviaciones
+   y por qué.
+4. **Auditar** con `audit-plan` (fidelidad al plan) y `audit-arquitectura` (sanidad de capas), en
+   paralelo.
+5. **Cerrar los hallazgos** y volver a correr las suites.
+6. **Suites vía `test-runner`**: unit + e2e, más `tsc --noEmit`.
+7. **Commit sin coautoría**, push.
+8. **Mover el ticket**: En curso → En revisión → Listo. **Las épicas las cierra el usuario**, no el
+   flujo.
+
+> **Dónde va cada decisión.** Si la decisión vale para un solo dominio, va a su PRD. Si vale para
+> todo el backend —una regla de privilegios, un orden de ejecución, una convención de pruebas— va a
+> `lineamientos-tecnicos.md`; si cruza dominios a nivel de producto, al PRD maestro. Archivar una
+> regla transversal dentro del PRD de un dominio es cómo se repite un error ya corregido: nadie la
+> va a buscar ahí.
+
 ## Estado inicial registrado (2026-07-22)
 
 - `ALPQ-16` (F0 — versiones) y `ALPQ-17` (F1 — init + estructura): **Finalizada**.

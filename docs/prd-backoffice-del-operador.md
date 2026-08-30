@@ -100,6 +100,11 @@ alpaqa_backoffice   → sin BYPASSRLS tampoco. Lo usa únicamente el módulo bac
                       alcanza las tablas que una HU le abrió explícitamente.
 ```
 
+> **Las reglas generales que salieron de este dominio viven ahora en `lineamientos-tecnicos.md`
+> §2.4** (el privilegio crece con su uso, `GRANT` por columna, políticas nominales, requisitos de
+> las funciones `SECURITY DEFINER`). Lo que sigue es el **razonamiento de este dominio**, no la
+> regla: la regla se consulta arriba.
+
 **Por qué se revisó** (confirmado con el usuario el 2026-08-29, al implementar BKO-03): `BYPASSRLS`
 es un atributo del **rol entero y permanente**, así que cubriría toda tabla, hoy y en el futuro —
 incluidas `order`, `comprobante`, `customer`. El invariante 6 («el operador ve metadatos, nunca
