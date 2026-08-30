@@ -90,13 +90,31 @@ migraciones tiene un solo dueño.
 
 ### 2.1 La segunda conexión — cómo se cruza el aislamiento
 
-**Decisión (§11.2): un rol de base de datos propio con `BYPASSRLS` y un cliente Prisma separado**,
-usados **solo** por este módulo.
+**Decisión (§11.2, revisada en BKO-03): un rol de base de datos propio y un cliente Prisma
+separado**, usados **solo** por este módulo. **Sin `BYPASSRLS`**: el acceso cross-tenant se abre
+tabla por tabla.
 
 ```
 alpaqa_app          → sin BYPASSRLS, RLS activa. Lo usan los seis módulos de tenant.
-alpaqa_backoffice   → con BYPASSRLS. Lo usa únicamente el módulo backoffice.
+alpaqa_backoffice   → sin BYPASSRLS tampoco. Lo usa únicamente el módulo backoffice, y solo
+                      alcanza las tablas que una HU le abrió explícitamente.
 ```
+
+**Por qué se revisó** (confirmado con el usuario el 2026-08-29, al implementar BKO-03): `BYPASSRLS`
+es un atributo del **rol entero y permanente**, así que cubriría toda tabla, hoy y en el futuro —
+incluidas `order`, `comprobante`, `customer`. El invariante 6 («el operador ve metadatos, nunca
+contenido») quedaría sostenido solo por qué métodos tiene el repositorio, que es un guardrail de
+código. Abriendo tabla por tabla, el encierro lo sostiene Postgres.
+
+Cada apertura son **dos llaves que giran juntas**, y se probaron por separado quitando cada una:
+
+1. el `GRANT`, sin el cual la consulta ni siquiera corre (`permission denied`);
+2. una **política RLS nominal para el rol**, sin la cual la consulta corre y devuelve **0 filas**
+   —la tabla tiene RLS y la política del cimiento exige `app.current_empresa`, que el backoffice
+   nunca fija—.
+
+Efecto lateral buscado: migrar ya no exige superusuario (`ALTER ROLE ... BYPASSRLS` sí lo exige, y
+en producción el rol de migración puede no serlo).
 
 Por qué así y no de otra forma:
 
@@ -132,12 +150,11 @@ Por qué así y no de otra forma:
    obligado a llevar `DATABASE_URL` —la conexión del **owner**, que evade RLS— solo para pasar la
    validación de arranque. Ahora hay **un perfil de validación por proceso**: cada uno exige lo
    suyo y ninguno el del otro. Verificado arrancando ambos binarios con `.env` disjuntos.
-7. **El privilegio crece con su uso** (corregido en la auditoría de BKO-01). El rol se crea en
-   BKO-01 **sin `BYPASSRLS` y con permiso solo sobre `operator_user`**: leer operadores no
-   necesita más, porque esa tabla no tiene RLS. `BYPASSRLS` y el acceso a las tablas de tenant
-   llegan en **BKO-03**, con el `TenantRepository` que los justifica. Concederlos antes habría
-   dado lectura cross-tenant de todo el contenido de negocio a un módulo cuyo único repositorio
-   lee operadores.
+7. **El privilegio crece con su uso** (corregido en la auditoría de BKO-01, extendido en BKO-03).
+   El rol se crea en BKO-01 con permiso solo sobre `operator_user`. BKO-03 le suma **`SELECT`
+   sobre `empresa` y nada más**: ni `UPDATE` (eso es BKO-04, con su propia política de escritura),
+   ni acceso a ninguna otra tabla. BKO-06 abrirá, una línea por tabla, solo lo que necesite
+   contar.
 
 ---
 
@@ -229,8 +246,10 @@ materializada, no un rediseño (§7).
    **Verificado al arrancar (BKO-01):** la validación de entorno exige que los cuatro secretos de
    firma sean distintos entre sí y la app no levanta si dos coinciden. El invariante dependía de
    que nadie copiara y pegara una variable; ahora falla ruidoso.
-3. **La conexión con `BYPASSRLS` es exclusiva de este módulo** (§2.1). Ningún caso de uso de tenant
-   la alcanza.
+3. **La conexión que cruza empresas es exclusiva de este módulo** (§2.1) — y **no** usa `BYPASSRLS`:
+   alcanza solo las tablas que una HU le abrió, con `GRANT` + política nominal. Ningún caso de uso
+   de tenant la alcanza: el token de inyección no se exporta, una regla de ESLint prohíbe importar
+   el cliente desde fuera del módulo, y el proceso de tenant ni siquiera lo carga.
 4. **Suspender tiene efecto.** Un tenant en `SUSPENDED` no opera: la cadena de guards corta sus
    requests con `403 TENANT_SUSPENDED`. Se verifica **por request contra la base**, no desde el
    token: una suspensión que tarda lo que tarda en expirar un access token (15 min) no es una
@@ -286,7 +305,9 @@ endpoints de BKO-02..06 quedan cubiertos sin tocar ese test.
   owner. No es la sobre-construcción que sí fue `LAST_ACTIVE_BRANCH` en ADM-04 —aquella se retiró
   porque nadie leía el flag—; `active` aquí lo leen el guard y el login en cada request.
 - **Tenants** — `GET /backoffice/tenants` (listado con filtro por estado y búsqueda por RUC o razón
-  social), `GET /backoffice/tenants/:id` (ficha: metadatos + plan + métricas del tenant),
+  social), `GET /backoffice/tenants/:id` (ficha: metadatos + plan + métricas del tenant; **BKO-03
+  entrega los metadatos** —datos fiscales, estado, capacidades y fecha de alta—, el plan se suma en
+  BKO-05 y las métricas en BKO-06),
   `PATCH /backoffice/tenants/:id/status` (`{ status }` → activar o suspender),
   `PUT /backoffice/tenants/:id/plan` (`{ planId | null }`).
 - **Planes** — `GET /backoffice/plans`, `POST /backoffice/plans`, `PATCH /backoffice/plans/:id`
@@ -304,8 +325,9 @@ endpoints de BKO-02..06 quedan cubiertos sin tocar ese test.
 - **Dos poblaciones, dos tablas, dos secretos.** Un operador y un cajero no comparten nada salvo
   que ambos se loguean. Separarlos en tabla, login y secreto de firma hace que "filtrar super-admin
   a un tenant" no sea un bug posible, sino un imposible estructural.
-- **`BYPASSRLS` acotado a una conexión** en vez de relajar políticas: el privilegio queda en un rol
-  de base de datos y una variable de entorno, no en una bandera de código (§2.1).
+- **Acceso cross-tenant acotado a una conexión y abierto tabla por tabla** en vez de un privilegio
+  de rol: queda en `GRANT`s y políticas nominales, no en una bandera de código ni en un atributo
+  que cubra lo que todavía no existe (§2.1).
 - **Suspender bloquea de verdad, y se lee por request.** El costo es una consulta indexada por PK
   por request; el beneficio es que la suspensión es inmediata. Cachearla es una optimización
   posterior, con invalidación explícita al cambiar el estado.
@@ -335,6 +357,13 @@ endpoints de BKO-02..06 quedan cubiertos sin tocar ese test.
 - **Rastro de auditoría** de las acciones del operador: suspender es la acción más sensible del
   producto. Lo construye el dominio de Auditoría; aquí el actor ya está disponible en cada caso de
   uso.
+- **Paginación del listado de tenants.** `GET /backoffice/tenants` no pagina (BKO-03): es el único
+  listado del producto cuyo tamaño crece con **toda la plataforma** y no con un tenant. Con decenas
+  de empresas no molesta; conviene resolverlo antes de que esa sea la pantalla de entrada del
+  backoffice, y a más tardar junto con BKO-06.
+- **El `GRANT` es por tabla, no por columna.** Hoy `empresa` no tiene columnas sensibles, pero el
+  recorte de lo que ve el operador lo hacen el `select` del repositorio y el DTO, no Postgres. A
+  tener presente al agregarle columnas a `empresa` (BKO-05 le suma `plan_id`).
 - **Métricas materializadas** si el `count` por tenant deja de alcanzar (§3.4).
 - **RBAC interno del operador** cuando haya más de un tipo de operador (§6).
 
@@ -344,7 +373,8 @@ endpoints de BKO-02..06 quedan cubiertos sin tocar ese test.
 
 - Módulo hexagonal **`backoffice`**, prefijo de HU **`BKO`**, físico inglés en las tablas nuevas.
 - **`OperatorUser` en tabla propia**, con login y **secreto de firma propios**.
-- **Rol de BD `alpaqa_backoffice` con `BYPASSRLS` y cliente Prisma separado**, exclusivo del módulo.
+- **Rol de BD `alpaqa_backoffice` y cliente Prisma separado**, exclusivo del módulo, **sin
+  `BYPASSRLS`**: el acceso se concede por tabla (revisión de BKO-03).
 - **`Company.estado` pasa a enum** y **suspender corta el acceso** por guard, leído por request.
 - **`Plan` se modela y se asigna; el gating no bloquea todavía.**
 - **El operador ve metadatos, nunca contenido del negocio.** Sin impersonación.
@@ -363,7 +393,7 @@ endpoints de BKO-02..06 quedan cubiertos sin tocar ese test.
 **Tenants:**
 | HU | Entregable |
 |---|---|
-| `BKO-03` | Listado y ficha de tenants. **Amplía el rol con `BYPASSRLS` y acceso a las tablas de tenant** — el rol y el cliente ya existen desde BKO-01, pero sin privilegio |
+| `BKO-03` | Listado y ficha de tenants (metadatos). **Abre el acceso cross-tenant: `GRANT SELECT` sobre `empresa` + política RLS nominal para el rol** — el rol y el cliente ya existen desde BKO-01, pero sin privilegio. **Sin `BYPASSRLS`** (revisión de §11.2) |
 | `BKO-04` | `Company.estado` a enum + suspender/activar **con efecto**: guard `TENANT_SUSPENDED` en la cadena, con la excepción de la cuenta propia |
 
 **Planes y métricas:**
@@ -395,8 +425,10 @@ vía `test-runner` → commit sin coautoría → push → mover el ticket en Jir
 **Riesgos a vigilar:**
 - **BKO-01** introduce un segundo mundo de autenticación. El test que importa no es que el operador
   entre: es que un token de operador **no** sirva en las rutas de tenant, y viceversa.
-- **BKO-03** le da `BYPASSRLS` al rol. Hay que probar que ningún módulo de tenant puede alcanzar esa
-  conexión, y que la de siempre sigue fallando cerrado.
+- **BKO-03** abre el acceso cross-tenant. Hay que probar que ningún módulo de tenant alcanza esa
+  conexión, que la de siempre sigue fallando cerrado, y —lo que se agregó al construirla— que
+  **cada una de las dos llaves es portante**: quitando el `GRANT` o la política, la suite se pone
+  roja por separado.
 - **BKO-04** toca la cadena de guards, que afecta a los seis módulos: la suite completa manda.
 
 ---
@@ -406,8 +438,10 @@ vía `test-runner` → commit sin coautoría → push → mover el ticket en Jir
 1. **Operadores con tabla y login propios:** `OperatorUser` aparte, tokens de audiencia distinta.
    Un operador no es un usuario de alguna empresa; separarlos hace imposible que un bug filtre
    super-admin a un tenant.
-2. **Rol de base de datos propio con `BYPASSRLS` y conexión aparte**, exclusivo del módulo
-   `backoffice`. `alpaqa_app` no cambia y ninguna política se relaja.
+2. **Rol de base de datos propio y conexión aparte**, exclusivo del módulo `backoffice`.
+   `alpaqa_app` no cambia y ninguna política suya se relaja. **Revisado el 2026-08-29 (BKO-03):
+   sin `BYPASSRLS`** — el acceso cross-tenant se abre tabla por tabla, con `GRANT` + política
+   nominal, para que el invariante 6 lo sostenga la base y no el repositorio (§2.1).
 3. **La suspensión se aplica; el plan solo se modela.** Coherente con el maestro §7 («gating en su
    versión más simple, con la estructura lista»). Una suspensión que no suspende sería peor que no
    tenerla — y hoy `estado` no bloquea nada.
