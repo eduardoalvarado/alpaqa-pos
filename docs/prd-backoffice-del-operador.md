@@ -195,9 +195,14 @@ Dos tablas nuevas y dos cambios en `empresa`.
 | features | text[] | banderas del plan; vocabulario abierto **por ahora** (§4.2 inv. 5) |
 | active | boolean | borrado lógico; un plan retirado no se asigna pero los que lo tienen lo conservan |
 
-- Va en `SHARED_MODELS` de `tenant-scope` (como `Company`): no es tabla de tenant y no lleva
-  `empresa_id`. El código ya lo anticipaba — el comentario de `tenant-scope.ts` menciona `Plan`
-  como ejemplo de tabla de plataforma futura.
+- **Queda FUERA del conjunto de modelos que el cliente de tenant puede leer sin acotar**
+  (`tenant-scope.ts`), al revés de lo que decía este PRD. El criterio no es "no tiene `empresa_id`"
+  sino "el lado del tenant **tiene** que leerlo", y son dos preguntas distintas: sin gating nadie
+  del lado del tenant lee planes. Dejarlo afuera hace que el cliente de tenant **falle cerrado** si
+  alguien lo consulta —le inyectaría un `companyId` que la tabla no tiene—, igual que con
+  `OperatorUser` (BKO-01). Entra el día que el gating lo necesite, junto con su `GRANT`. Por la
+  confusión que generaba, la constante se renombró de `SHARED_MODELS` a
+  `TENANT_READABLE_UNSCOPED_MODELS`.
 
 ### 3.3 Cambios en `empresa`
 
@@ -271,7 +276,9 @@ materializada, no un rediseño (§7).
    **La lista de excepciones está cerrada por test**, no por disciplina: un e2e descubre los
    handlers reales de la app y exige que el conjunto marcado sea exactamente esos tres. Marcar una
    cuarta ruta pone la suite en rojo — verificado marcando una ruta de negocio.
-5. **El plan se asigna pero todavía no bloquea** (decisión §11.3). `features` es hoy un vocabulario
+5. **El plan se asigna pero todavía no bloquea** (decisión §11.3; construido en BKO-05, con un
+   e2e que crea un plan con una feature inventada y espera 201 — se pone rojo el día que alguien
+   cierre el vocabulario, que es la decisión de la HU de gating y no de antes). `features` es hoy un vocabulario
    **abierto**: se guarda lo que el operador escriba. Cuando el gating se active, ese vocabulario
    pasa a ser cerrado y verificado —como `Permission`—, y esa es exactamente la HU que lo cierra.
 6. **El operador ve metadatos, no contenido.** Los puertos de este módulo no exponen ni una fila de
@@ -387,7 +394,11 @@ endpoints de BKO-02..06 quedan cubiertos sin tocar ese test.
   listado del producto cuyo tamaño crece con **toda la plataforma** y no con un tenant. Con decenas
   de empresas no molesta; conviene resolverlo antes de que esa sea la pantalla de entrada del
   backoffice, y a más tardar junto con BKO-06.
-- **El `GRANT` de *lectura* es por tabla, no por columna.** BKO-04 saldó las dos mitades de
+- **El `GRANT` de *lectura* es por tabla, no por columna.** (BKO-05 completó la escritura: el
+  `INSERT` de `empresa` también pasó a ser por columna, así que el dueño no puede fijarse `estado`
+  ni `plan_id` **ni al crear**. Antes solo estaba cerrado el `UPDATE`, y el `INSERT` de tabla cubre
+  toda columna, incluidas las que todavía no existen — el registro self-service podía nacer
+  `ACTIVE` y con plan.) BKO-04 saldó las dos mitades de
   escritura: el operador solo puede escribir `("estado", "updated_at")`, y el **dueño** perdió el
   `UPDATE` de tabla entera sobre `empresa` —se re-otorgó columna por columna, sin `estado`—, así
   que "el tenant no se auto-reactiva" dejó de depender de que el repositorio escriba campo por
@@ -429,7 +440,7 @@ endpoints de BKO-02..06 quedan cubiertos sin tocar ese test.
 **Planes y métricas:**
 | HU | Entregable |
 |---|---|
-| `BKO-05` | `Plan` CRUD + `Company.planId`: asignar y quitar plan (sin gating) |
+| `BKO-05` | `Plan` CRUD + `Company.planId`: asignar y quitar plan (sin gating). `code` inmutable tras el alta, sostenido también por `GRANT UPDATE` por columna. Cierra además el borde de `INSERT` que BKO-04 había dejado abierto sobre `empresa` |
 | `BKO-06` | Métricas derivadas: por tenant y globales |
 
 > Códigos `BKO-0x` = etiqueta de orden que reinicia por segmento; el id/referencia de cada HU es su
