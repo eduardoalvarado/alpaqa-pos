@@ -201,11 +201,15 @@ Dos tablas nuevas y dos cambios en `empresa`.
 
 ### 3.3 Cambios en `empresa`
 
-- **CAMBIO (BKO-03): `estado` pasa de texto libre a enum** `CompanyStatus {TRIAL, ACTIVE,
+- **HECHO (BKO-04): `estado` pasó de texto libre a enum** `CompanyStatus {TRIAL, ACTIVE,
   SUSPENDED}` (físico `estado`, valores migrados desde `'trial' | 'activo' | 'suspendido'`).
-  Hoy es una cadena que nadie valida; en cuanto un guard **dependa** de ella, un `'Suspendido'` con
-  mayúscula sería un tenant suspendido que sigue operando. La migración convierte los valores
-  existentes y deja el default en `TRIAL`.
+  Era una cadena que nadie validaba; desde que un guard **depende** de ella, un `'Suspendido'` con
+  mayúscula habría sido un tenant suspendido que sigue operando. La migración convierte con
+  `lower(trim(...))` y deja el default en `TRIAL`.
+
+  **La migración frena si encuentra un valor que no sabe traducir**, en vez de caer en un
+  `ELSE 'TRIAL'`. Un valor sucio que significaba "suspendido" se habría vuelto un tenant operativo
+  en silencio y sin forma de detectarlo después; es preferible que falle y que alguien mire.
 - **CAMBIO (BKO-05): `planId` uuid NULL FK → `Plan`** (`@map("plan_id")`). Nullable a propósito: un
   tenant en `TRIAL` puede no tener plan, y un plan no puede ser obligatorio antes de que exista el
   primero.
@@ -232,7 +236,7 @@ materializada, no un rediseño (§7).
 | **`TenantRepository`** (nuevo) | lista y ficha de empresas **a través de tenants**; cambia estado y plan. Es el puerto que justifica la segunda conexión. |
 | **`PlanRepository`** (nuevo) | CRUD de planes. |
 | **`TenantMetricsReader`** (nuevo) | agregados por tenant y globales. **Solo cuenta**, no devuelve filas de negocio. |
-| **`CompanyStatusReader`** (nuevo, del lado del tenant) | lo consume la cadena de guards para cortar a un tenant suspendido. Vive en `platform/tenancy`, no en este módulo: quien lo usa es la infraestructura transversal, y `platform` no puede depender de un módulo de dominio. |
+| **`CompanyStatusReader`** (BKO-04, del lado del tenant) | lo consume la cadena de guards para cortar a un tenant suspendido. Vive en `platform/tenancy`, no en este módulo: quien lo usa es la infraestructura transversal, y `platform` no puede depender de un módulo de dominio. **Lee por una función `SECURITY DEFINER`** (`company_status`), no por el modelo Prisma: los guards corren **antes** que el `TenantInterceptor`, así que todavía no existe `app.current_empresa` y la RLS de `empresa` devolvería 0 filas. Es la misma situación del login, resuelta igual y con la misma superficie mínima: una columna de una fila, y `EXECUTE` para el rol de app. **Requisito de despliegue (ver §7)**: el dueño de esa función debe ser superusuario o tener `BYPASSRLS`. |
 
 ### 4.2 Invariantes del dominio
 
@@ -250,12 +254,23 @@ materializada, no un rediseño (§7).
    alcanza solo las tablas que una HU le abrió, con `GRANT` + política nominal. Ningún caso de uso
    de tenant la alcanza: el token de inyección no se exporta, una regla de ESLint prohíbe importar
    el cliente desde fuera del módulo, y el proceso de tenant ni siquiera lo carga.
-4. **Suspender tiene efecto.** Un tenant en `SUSPENDED` no opera: la cadena de guards corta sus
-   requests con `403 TENANT_SUSPENDED`. Se verifica **por request contra la base**, no desde el
-   token: una suspensión que tarda lo que tarda en expirar un access token (15 min) no es una
-   suspensión. Excepción deliberada: las rutas de la propia cuenta (`GET /me`,
-   `POST /me/password`) siguen abiertas, para que el dueño no quede encerrado fuera de su propia
-   cuenta mientras negocia con nosotros.
+4. **Suspender tiene efecto** (BKO-04, construido). Un tenant en `SUSPENDED` no opera: la cadena de
+   guards corta sus requests con `403 TENANT_SUSPENDED`. Se verifica **por request contra la base**,
+   no desde el token: una suspensión que tarda lo que tarda en expirar un access token (15 min) no
+   es una suspensión. Excepción deliberada, marcada con `@AllowsSuspended()` y con lista corta:
+   `GET /auth/me`, `GET /me` y `POST /me/password`, para que el dueño no quede encerrado fuera de su
+   propia cuenta mientras negocia con nosotros. El login sigue abierto por ser ruta pública.
+
+   **El orden en la cadena es portante**: el `TenantStatusGuard` va entre `CompanyContextGuard` y
+   `PermissionsGuard`. Un suspendido tiene permisos perfectamente válidos, así que dejarlo llegar al
+   guard de permisos le daría un 403 por el motivo equivocado. Hay un test que fija ese orden —se
+   pone rojo si el guard se registra después—, y tres mutaciones verificadas: sacar el guard, moverlo
+   de lugar y leer el estado de una constante en vez de la base ponen roja una prueba distinta cada
+   una.
+
+   **La lista de excepciones está cerrada por test**, no por disciplina: un e2e descubre los
+   handlers reales de la app y exige que el conjunto marcado sea exactamente esos tres. Marcar una
+   cuarta ruta pone la suite en rojo — verificado marcando una ruta de negocio.
 5. **El plan se asigna pero todavía no bloquea** (decisión §11.3). `features` es hoy un vocabulario
    **abierto**: se guarda lo que el operador escriba. Cuando el gating se active, ese vocabulario
    pasa a ser cerrado y verificado —como `Permission`—, y esa es exactamente la HU que lo cierra.
@@ -308,7 +323,8 @@ endpoints de BKO-02..06 quedan cubiertos sin tocar ese test.
   social), `GET /backoffice/tenants/:id` (ficha: metadatos + plan + métricas del tenant; **BKO-03
   entrega los metadatos** —datos fiscales, estado, capacidades y fecha de alta—, el plan se suma en
   BKO-05 y las métricas en BKO-06),
-  `PATCH /backoffice/tenants/:id/status` (`{ status }` → activar o suspender),
+  `PATCH /backoffice/tenants/:id/status` (`{ status }` → **`ACTIVE` o `SUSPENDED`**; `TRIAL` no es
+  asignable: es el estado con el que un tenant nace, no un destino al que devolverlo),
   `PUT /backoffice/tenants/:id/plan` (`{ planId | null }`).
 - **Planes** — `GET /backoffice/plans`, `POST /backoffice/plans`, `PATCH /backoffice/plans/:id`
   (nombre, `features`, `active`).
@@ -357,13 +373,27 @@ endpoints de BKO-02..06 quedan cubiertos sin tocar ese test.
 - **Rastro de auditoría** de las acciones del operador: suspender es la acción más sensible del
   producto. Lo construye el dominio de Auditoría; aquí el actor ya está disponible en cada caso de
   uso.
+- **Requisito de despliegue de las funciones `SECURITY DEFINER`.** `empresa` tiene `FORCE ROW
+  LEVEL SECURITY`, y con `FORCE` la RLS alcanza **también al dueño de la tabla**: ser owner **no**
+  basta para evadirla. El dueño de `company_status` —y de `auth_lookup_by_email`, que depende de lo
+  mismo desde el cimiento— tiene que ser superusuario o tener `BYPASSRLS`. Si no lo es, la función
+  devuelve `NULL` y la cadena de guards rechaza **toda** request autenticada, culpando al token.
+  Verificado a mano cambiándole el dueño a la función. No es nuevo de BKO-04 —sin esto tampoco se
+  puede iniciar sesión—, pero BKO-04 lo pone en el camino de cada request, así que hay un smoke que
+  lo detecta (`tenant-suspension.e2e-spec`). **Matiza lo dicho en §2.1**: lo que BKO-03 dejó de
+  exigir es superusuario para *migrar*; las funciones `SECURITY DEFINER` sí necesitan un dueño
+  exento.
 - **Paginación del listado de tenants.** `GET /backoffice/tenants` no pagina (BKO-03): es el único
   listado del producto cuyo tamaño crece con **toda la plataforma** y no con un tenant. Con decenas
   de empresas no molesta; conviene resolverlo antes de que esa sea la pantalla de entrada del
   backoffice, y a más tardar junto con BKO-06.
-- **El `GRANT` es por tabla, no por columna.** Hoy `empresa` no tiene columnas sensibles, pero el
-  recorte de lo que ve el operador lo hacen el `select` del repositorio y el DTO, no Postgres. A
-  tener presente al agregarle columnas a `empresa` (BKO-05 le suma `plan_id`).
+- **El `GRANT` de *lectura* es por tabla, no por columna.** BKO-04 saldó las dos mitades de
+  escritura: el operador solo puede escribir `("estado", "updated_at")`, y el **dueño** perdió el
+  `UPDATE` de tabla entera sobre `empresa` —se re-otorgó columna por columna, sin `estado`—, así
+  que "el tenant no se auto-reactiva" dejó de depender de que el repositorio escriba campo por
+  campo. El `SELECT` del operador, en cambio, sigue siendo de tabla entera: lo que ve lo recortan
+  el `select` del repositorio y el DTO, no Postgres. A tener presente al agregarle columnas a
+  `empresa` (BKO-05 le suma `plan_id`).
 - **Métricas materializadas** si el `count` por tenant deja de alcanzar (§3.4).
 - **RBAC interno del operador** cuando haya más de un tipo de operador (§6).
 
@@ -394,7 +424,7 @@ endpoints de BKO-02..06 quedan cubiertos sin tocar ese test.
 | HU | Entregable |
 |---|---|
 | `BKO-03` | Listado y ficha de tenants (metadatos). **Abre el acceso cross-tenant: `GRANT SELECT` sobre `empresa` + política RLS nominal para el rol** — el rol y el cliente ya existen desde BKO-01, pero sin privilegio. **Sin `BYPASSRLS`** (revisión de §11.2) |
-| `BKO-04` | `Company.estado` a enum + suspender/activar **con efecto**: guard `TENANT_SUSPENDED` en la cadena, con la excepción de la cuenta propia |
+| `BKO-04` | `Company.estado` a enum + suspender/activar **con efecto**: `TenantStatusGuard` en la cadena (entre empresa y permisos), lector vía `SECURITY DEFINER`, excepción `@AllowsSuspended()` para la cuenta propia. Abre además el `GRANT UPDATE ("estado", "updated_at")` **por columna** y su política de escritura |
 
 **Planes y métricas:**
 | HU | Entregable |
