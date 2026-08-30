@@ -152,9 +152,19 @@ Como las tres superficies consumen el mismo backend, **el diseño de la API y el
 
 ### Reportes
 - Ventas por sucursal, productos más vendidos, cierres de caja, descuentos y anulaciones por usuario.
+- **Dominio con PRD propio** (§10), el último del MVP: es puramente aditivo sobre datos que los
+  demás dominios ya capturan. Su permiso, `ver_totales`, ya existe en el vocabulario y todavía no
+  lo consume ninguna ruta.
 
 ### Auditoría (transversal)
 - Registro de quién hizo qué y cuándo, con foco en descuentos, anulaciones y cierres de caja.
+- **Dominio con PRD propio** (§10), después de *Sincronización offline*. Es prerrequisito de dos
+  cosas que hoy están fuera del MVP —soporte sobre datos e impersonación del operador—, y el
+  Backoffice ya le dejó un consumidor esperando: **quién suspendió a qué tenant y cuándo** es la
+  acción más sensible del producto y hoy no deja rastro.
+- **Costura ya identificada (BKO-06):** los casos de uso del backoffice **no reciben al actor** —
+  solo llega hasta el controlador. Enganchar el rastro va a exigir tocar las firmas de los casos de
+  uso que escriben. Está nombrado para que no se descubra tarde.
 
 ---
 
@@ -360,6 +370,27 @@ Se agrupan módulos acoplados que se diseñan juntos. Cada PRD de dominio **refe
 - **Plataforma y administración** — empresa, sucursales, usuarios, roles, capacidades.
 - **Backoffice del operador** — tenants, planes, feature gating.
 - **Sincronización offline** — PRD propio por ser transversal y complejo.
+- **Auditoría** — quién hizo qué y cuándo (§4). Transversal: se engancha en las rutas de
+  escritura de los demás dominios.
+- **Reportes** — los agregados de §4 para el dueño (`ver_totales` ya está en el vocabulario de
+  permisos y **todavía no lo usa ninguna ruta**: se reservó para este dominio).
+
+> **Alineación §4 ↔ §10 (ago-2026).** Hasta acá el §4 nombraba **Reportes** y **Auditoría** como
+> módulos del MVP, el §10 no los listaba como dominios, y el §9 tampoco los ponía fuera del MVP:
+> quedaban en un limbo por el que el MVP podía darse por terminado con dos módulos declarados y sin
+> construir. **Los dos son del MVP**, y no por criterio nuevo sino por lo que este mismo documento
+> ya decía: el §9 difiere a fase 2 las *analíticas avanzadas* (lo que presupone reportes básicos
+> adentro) y la *detección de anomalías* diciendo que «se alimenta del módulo de auditoría» (lo que
+> presupone que el módulo existe). **Clientes** no entra a esta lista porque no quedó en limbo: lo
+> absorbió *Facturación electrónica*, que ya modela `Customer` y lo captura al emitir.
+>
+> **Orden dentro del MVP: Sincronización offline → Auditoría → Reportes.** Sincro va primero
+> porque reescribe *cómo se escribe* en todo el backend (operaciones encoladas, resolución de
+> conflictos, escrituras diferidas respecto del acto que las originó), y Auditoría se engancha
+> justo en esas rutas: construirla antes es diseñarla contra rutas que están por cambiar, y obliga
+> a contestar sin datos si los registros de auditoría se sincronizan o solo se generan en el
+> servidor. Reportes va último por ser puramente aditivo: lee lo que ya se captura y no cierra
+> ninguna puerta.
 
 ### Regla de generación
 Los PRDs de dominio **no se generan todos por adelantado**. Cada uno se genera **justo antes de entrar a implementar ese dominio**, con contexto fresco, para evitar acumular documentación que se desactualiza antes de tocarse. El documento raíz sí existe desde el inicio.
