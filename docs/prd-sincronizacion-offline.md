@@ -137,7 +137,11 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
 ### 4.2 Invariantes del dominio
 
 1. **Idempotencia por `clientUuid`.** Reenviar una operación ya aplicada devuelve **el mismo
-   recurso y un resultado de éxito**, no un 409. El POS reintenta ante cualquier duda —y debe
+   recurso y un resultado de éxito**, no un 409. Ojo con el efecto lateral: la idempotencia no
+   alcanza con no duplicar la fila, tiene que no duplicar **sus consecuencias**. Ese trabajo ya
+   está hecho del lado del inventario —`registerSale` es idempotente por `orderId`, así que
+   reasentar una venta no descuenta stock dos veces—, y es el patrón a verificar en cada
+   consecuencia nueva que una HU sume. El POS reintenta ante cualquier duda —y debe
    poder hacerlo sin miedo: una respuesta perdida en la red es indistinguible de una operación no
    aplicada.
 2. **El lote se aplica en orden de dependencia.** Un pago no puede aplicarse antes que su orden.
@@ -155,7 +159,10 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
    servidor rompería el ticket que el cliente ya se llevó impreso.
 6. **La bajada es de solo lectura y acotada a la sucursal** del turno. El POS no baja otras
    sucursales ni datos de administración.
-7. **Un lote pertenece a un turno de caja y a una sucursal.** No se aceptan operaciones de
+7. **Un dispositivo avisa a las 72 h sin sincronizar, pero no deja de vender** (§11.2). El aviso
+   es visible en el POS y el pendiente aparece en `/sync/status`. Cortar la venta al vencer el tope
+   sería exactamente el fallo que este dominio existe para evitar.
+8. **Un lote pertenece a un turno de caja y a una sucursal.** No se aceptan operaciones de
    sucursales distintas en el mismo lote: acota el radio de un error y hace el rechazo legible.
 
 ---
@@ -170,8 +177,8 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
   200 con el detalle, porque el POS necesita saber *cuál* falló, no que "algo" falló.
 
 ### Bajada
-- **`GET /sync/working-set?branchId=&since=`** — catálogo de la sucursal, mesas y turno abierto.
-  `since` permite delta; sin él, completo. Es **el mismo dato** que sirven los endpoints de
+- **`GET /sync/working-set?branchId=&since=`** — catálogo de la sucursal con **precios ya
+  resueltos** (§11.3), mesas y turno abierto. `since` permite delta; sin él, completo. Es **el mismo dato** que sirven los endpoints de
   catálogo y mesas, agrupado en una sola respuesta para que el POS no encadene seis llamadas con
   conexión intermitente.
 
@@ -198,7 +205,16 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
   dispositivo —ya lo impide el índice único parcial de SAL-08— y **turno de caja** duplicado en la
   misma caja. Los dos se rechazan con su código de dominio y el POS los muestra. Adivinar acá es
   perder una venta o duplicarla.
-- **El stock no se valida offline** — ver §11: es la decisión que falta confirmar.
+- **El stock no se valida offline** (§11.1). El POS vende y el servidor concilia; el saldo puede
+  quedar negativo y se corrige con un ajuste. Lo decisivo al verificarlo contra el código: **el
+  camino de venta online tampoco valida stock** —`PrismaInventoryWriter.registerSale` asienta el
+  movimiento negativo sin rechazar por insuficiencia—, así que esta decisión **no** crea una
+  divergencia entre online y offline. Es la misma regla en los dos caminos, que es exactamente lo
+  que exige el invariante 4.
+
+  Validar contra la última foto local daría falsa seguridad: dos cajas offline con la misma foto
+  venden igual la última unidad, y encima se rechazan ventas legítimas. Se paga el costo del
+  rechazo sin obtener la garantía que lo justificaría.
 - **Backoff con tope y sin cola infinita.** Un comprobante rechazado por SUNAT no se reintenta
   eternamente: tras el tope queda visible en `/sync/status` con su motivo, para que alguien lo
   corrija. Un reintento silencioso e infinito es cómo un error de datos se vuelve invisible.
@@ -257,6 +273,8 @@ mutation-testing de cada garantía nueva → commit → push → mover el ticket
 - **SYN-01** define la forma del lote. Equivocarse ahí se paga en las cinco HU siguientes.
 - **SYN-03** toca numeración legal. El test que importa no es que el comprobante se cree: es que
   reenviar el mismo lote **no consuma un correlativo nuevo**.
+- **SYN-01/02** heredan idempotencia de consecuencias ya resuelta en inventario; hay que
+  verificar que cada consecuencia nueva la tenga, no asumirlo.
 - **SYN-04** es la primera respuesta grande del proyecto. Hay que medir su tamaño con un catálogo
   realista antes de darla por buena.
 - La dependencia `sync → módulos de dominio` es nueva en el proyecto (§2.1): conviene que la
@@ -264,15 +282,17 @@ mutation-testing de cada garantía nueva → commit → push → mover el ticket
 
 ---
 
-## 11. Decisiones a confirmar antes de implementar
+## 11. Decisiones confirmadas con el usuario (ago-2026)
 
-1. **¿El POS valida stock offline?** *(la que más cambia el diseño)*
-   - **(a) No valida** — vende y el servidor concilia; el stock puede quedar negativo y se corrige
-     con un ajuste. **Recomendada**: es lo que hace una bodega hoy con un cuaderno, y una venta
-     perdida por un stock desactualizado es peor que un ajuste posterior.
-   - **(b) Valida contra su última foto** — rechaza en el mostrador. Da falsa seguridad: dos cajas
-     offline igual pueden vender la misma última unidad.
-2. **¿Cuánto puede vivir un lote sin subir?** Un tope (p. ej. 72 h) permite avisar al cajero antes
-   de que el problema sea grande. Sin tope, un dispositivo puede acumular una semana en silencio.
-3. **¿`/sync/working-set` incluye precios resueltos o reglas?** Resueltos es más simple y más
-   chico; reglas prepara el terreno para precios por horario (costura del maestro §9.bis).
+1. **El POS NO valida stock offline.** Vende y el servidor concilia; el saldo puede quedar negativo
+   y se corrige con un ajuste. Verificado contra el código: **el camino online tampoco valida**, así
+   que no hay dos reglas. La alternativa —validar contra la última foto local— da falsa seguridad,
+   porque dos cajas offline venden igual la misma última unidad, y además rechaza ventas legítimas.
+2. **Tope de 72 h sin sincronizar**, con aviso visible. Cubre un fin de semana largo sin alarmas
+   falsas. **El aviso no corta la venta**: un POS que deja de vender por no haber sincronizado es
+   el fallo que este dominio existe para evitar.
+3. **`/sync/working-set` manda precios resueltos**, no reglas. Respuesta más chica y POS más
+   simple, que es lo que importa en una conexión intermitente. No cierra la puerta a precios por
+   horario: el resolutor ya está centralizado (costura del maestro §9.bis), así que mandar reglas
+   después es cambiar qué se serializa, no rearmar el POS. Duplicar el resolutor en el cliente hoy
+   sería justo la segunda verdad que este dominio evita en todo lo demás.
