@@ -153,8 +153,10 @@ Por qué así y no de otra forma:
 7. **El privilegio crece con su uso** (corregido en la auditoría de BKO-01, extendido en BKO-03).
    El rol se crea en BKO-01 con permiso solo sobre `operator_user`. BKO-03 le suma **`SELECT`
    sobre `empresa` y nada más**: ni `UPDATE` (eso es BKO-04, con su propia política de escritura),
-   ni acceso a ninguna otra tabla. BKO-06 abrirá, una línea por tabla, solo lo que necesite
-   contar.
+   ni acceso a ninguna otra tabla. **BKO-06 no amplió esta lista.** Se
+   pensaba abrir «una línea por tabla» para contar, pero eso le habría dado al rol lectura
+   de filas de todo el contenido de negocio; en su lugar lee por funciones `SECURITY
+   DEFINER` que solo devuelven conteos (§3.4).
 
 ---
 
@@ -222,7 +224,22 @@ Dos tablas nuevas y dos cambios en `empresa`.
 ### 3.4 Sin tablas de métricas
 
 Las métricas son **derivadas**, no persistidas (misma decisión que el onboarding en ADM-08): se
-cuentan al consultarlas. Un contador materializado se desincroniza y hay que mantenerlo; para el
+cuentan al consultarlas.
+
+**Cómo se leen es la decisión de BKO-06, y salió mejor que lo anticipado.** BKO-03 preveía abrir el
+acceso «una línea por tabla» —`GRANT SELECT` + política RLS para `order`, `comprobante`,
+`producto`…—. Eso funciona, pero le daría al rol del backoffice **lectura de filas** de todo el
+contenido de negocio, y el invariante 6 volvería a depender de qué métodos tiene el repositorio. En
+vez de eso el rol **no gana ni un privilegio de tabla**: gana `EXECUTE` sobre dos funciones
+`SECURITY DEFINER` cuyo tipo de retorno son **solo conteos** (`bigint`). No hay forma de sacarles
+contenido porque no hay una sola columna de negocio en su firma, y hay un e2e que se pone rojo si
+alguien concede el `SELECT`.
+
+**Qué se cuenta, explícitamente:** filas existentes, sin filtrar por estado. Una sucursal cerrada,
+un usuario desactivado y un producto retirado **suman**; también las órdenes anuladas y los
+comprobantes rechazados. Es deliberado —la pregunta del operador es de tamaño y de uso histórico,
+no de inventario vigente—, y está escrito en el tipo de dominio para que no haya que deducirlo del
+SQL. «Sucursales activas» sería una métrica **distinta**, no un cambio de significado de esta. Un contador materializado se desincroniza y hay que mantenerlo; para el
 volumen del MVP, `count` por tenant alcanza. Si el costo aparece, la costura es una vista
 materializada, no un rediseño (§7).
 
@@ -335,8 +352,10 @@ endpoints de BKO-02..06 quedan cubiertos sin tocar ese test.
   `PUT /backoffice/tenants/:id/plan` (`{ planId | null }`).
 - **Planes** — `GET /backoffice/plans`, `POST /backoffice/plans`, `PATCH /backoffice/plans/:id`
   (nombre, `features`, `active`).
-- **Métricas** — `GET /backoffice/metrics` (agregados globales: tenants por estado, altas por
-  período, totales de la plataforma).
+- **Métricas** — `GET /backoffice/metrics?days=N` (agregados globales: tenants por estado, altas
+  del período —`days` por defecto 30—, y totales de la plataforma). Las **del tenant** viajan en su
+  ficha, no en el listado: contarlas por cada fila de una lista sería un N+1 sobre las tablas más
+  grandes del sistema.
 
 **Permisos RBAC:** ninguno del vocabulario de tenant aplica aquí. La autorización del backoffice es
 **binaria**: se es operador o no se es, y lo resuelve el guard propio (§6).
@@ -378,8 +397,12 @@ endpoints de BKO-02..06 quedan cubiertos sin tocar ese test.
 - **Soporte sobre datos e impersonación** (§11.4): hoy el operador ve metadatos. Habilitar lectura
   de negocio exige rastro de auditoría **antes**, no después.
 - **Rastro de auditoría** de las acciones del operador: suspender es la acción más sensible del
-  producto. Lo construye el dominio de Auditoría; aquí el actor ya está disponible en cada caso de
-  uso.
+  producto. Lo construye el dominio de Auditoría. **Corrección (auditoría de BKO-06):** este PRD
+  decía que «el actor ya está disponible en cada caso de uso», y es **falso** — ningún `execute()`
+  del módulo recibe al operador; solo llega hasta el controlador, vía `@CurrentOperator`. Enganchar
+  auditoría va a exigir tocar las firmas de los casos de uso que escriben (estado, plan, alta y
+  edición de operadores). No es caro, pero no está preparado, y el dominio se cierra con esa deuda
+  nombrada en vez de supuesta.
 - **Requisito de despliegue de las funciones `SECURITY DEFINER`.** `empresa` tiene `FORCE ROW
   LEVEL SECURITY`, y con `FORCE` la RLS alcanza **también al dueño de la tabla**: ser owner **no**
   basta para evadirla. El dueño de `company_status` —y de `auth_lookup_by_email`, que depende de lo
@@ -390,10 +413,21 @@ endpoints de BKO-02..06 quedan cubiertos sin tocar ese test.
   lo detecta (`tenant-suspension.e2e-spec`). **Matiza lo dicho en §2.1**: lo que BKO-03 dejó de
   exigir es superusuario para *migrar*; las funciones `SECURITY DEFINER` sí necesitan un dueño
   exento.
-- **Paginación del listado de tenants.** `GET /backoffice/tenants` no pagina (BKO-03): es el único
-  listado del producto cuyo tamaño crece con **toda la plataforma** y no con un tenant. Con decenas
-  de empresas no molesta; conviene resolverlo antes de que esa sea la pantalla de entrada del
-  backoffice, y a más tardar junto con BKO-06.
+
+  **BKO-06 suma dos funciones a esa lista** (`backoffice_tenant_metrics`,
+  `backoffice_platform_metrics`), y ahí el modo de fallo es **peor porque es silencioso**: con un
+  dueño no exento no dan error, dan **ceros verosímiles**. Un operador vería una plataforma vacía y
+  la creería.
+- **`search_path` sin `pg_temp` en las funciones del cimiento.** Las dos de BKO-06 ya lo declaran;
+  las seis anteriores no. Sin `pg_temp` explícito, Postgres lo busca antes que los esquemas
+  listados, así que un caller con privilegio `TEMP` podría anteponerle una tabla temporal. El daño
+  acotado es falsear un resultado, no exfiltrar. Se cierra cuando haya motivo para tocar esas
+  funciones; reescribir seis del cimiento sin necesidad es más riesgo que beneficio.
+- ~~**Paginación del listado de tenants.**~~ **Hecha en BKO-06**, que era el plazo que esta costura
+  tenía puesto: `GET /backoffice/tenants` acepta `limit`/`offset`, con tope por defecto y máximo
+  acotados en el dominio, y orden total (`createdAt desc, id desc`) para que las páginas no repitan
+  ni pierdan filas. El tope **no es opcional**: sin valor por defecto, la pantalla de entrada del
+  backoffice traería la tabla entera.
 - **El `GRANT` de *lectura* es por tabla, no por columna.** (BKO-05 completó la escritura: el
   `INSERT` de `empresa` también pasó a ser por columna, así que el dueño no puede fijarse `estado`
   ni `plan_id` **ni al crear**. Antes solo estaba cerrado el `UPDATE`, y el `INSERT` de tabla cubre
@@ -405,7 +439,8 @@ endpoints de BKO-02..06 quedan cubiertos sin tocar ese test.
   campo. El `SELECT` del operador, en cambio, sigue siendo de tabla entera: lo que ve lo recortan
   el `select` del repositorio y el DTO, no Postgres. A tener presente al agregarle columnas a
   `empresa` (BKO-05 le suma `plan_id`).
-- **Métricas materializadas** si el `count` por tenant deja de alcanzar (§3.4).
+- **Métricas materializadas** si el `count` por tenant deja de alcanzar (§3.4). Hoy la ficha
+  dispara cinco `count(*)`; el listado no cuenta nada, a propósito.
 - **RBAC interno del operador** cuando haya más de un tipo de operador (§6).
 
 ---
@@ -441,7 +476,7 @@ endpoints de BKO-02..06 quedan cubiertos sin tocar ese test.
 | HU | Entregable |
 |---|---|
 | `BKO-05` | `Plan` CRUD + `Company.planId`: asignar y quitar plan (sin gating). `code` inmutable tras el alta, sostenido también por `GRANT UPDATE` por columna. Cierra además el borde de `INSERT` que BKO-04 había dejado abierto sobre `empresa` |
-| `BKO-06` | Métricas derivadas: por tenant y globales |
+| `BKO-06` | Métricas derivadas: por tenant (en la ficha) y globales (`/backoffice/metrics`). **Sin ampliar el privilegio del rol**: dos funciones `SECURITY DEFINER` que solo cuentan, con `EXECUTE` acotado |
 
 > Códigos `BKO-0x` = etiqueta de orden que reinicia por segmento; el id/referencia de cada HU es su
 > clave Jira `ALPQ-N`.
