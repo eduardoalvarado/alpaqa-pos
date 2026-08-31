@@ -133,6 +133,16 @@ antes de agregar nada:
 inmutable (§6.D). El estado de una cola de reintentos no es parte del documento; mezclarlos hace
 que cada reintento "toque" una fila que el modelo declara inmutable.
 
+### 3.2 Deuda de cobertura que SYN-01 deja anotada
+
+La idempotencia bajó a la base —el repositorio de órdenes resuelve el `P2002` de sus dos únicos
+preguntándole a la base cuál chocó, porque este driver no puebla `meta.target`— pero **ese camino
+no tiene cobertura determinista**: una carrera real no se fuerza desde afuera. Hay un e2e que manda
+cuatro lotes idénticos en paralelo y exige que ninguno dé 500 y que exista una sola orden, pero
+puede resultar **vacuo** si las requests no se solapan en la ventana justa. Está dicho así en el
+propio test. Cerrarlo de verdad exigiría una prueba a nivel de repositorio con contexto de tenant
+abierto a mano; se anota como deuda antes que fingir que está probado.
+
 **Qué NO se persiste:** la cola en sí. Los pendientes son **derivados** —`sunatStatus IN
 (GENERADO, RECHAZADO)`—, misma decisión que las métricas (BKO-06) y el onboarding (ADM-08). Una
 tabla-cola paralela al estado del comprobante es una segunda verdad que se desincroniza.
@@ -192,8 +202,12 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
 9. **Un dispositivo avisa a las 72 h sin sincronizar, pero no deja de vender** (§11.2). El aviso
    es visible en el POS y el pendiente aparece en `/sync/status`. Cortar la venta al vencer el tope
    sería exactamente el fallo que este dominio existe para evitar.
-10. **Un lote pertenece a un turno de caja y a una sucursal.** No se aceptan operaciones de
-   sucursales distintas en el mismo lote: acota el radio de un error y hace el rechazo legible.
+10. **Un lote pertenece a una sucursal.** La fija la primera operación que prospera —deducirla
+   de lo aplicado evita que un encabezado mienta sobre el contenido—, y una operación de otra
+   sucursal se rechaza con `SYNC_MIXED_BRANCH`. **Se rechaza la operación, no el lote**
+   (precisión de SYN-01 sobre el enunciado original): tirar abajo ventas legítimas por una fila
+   intrusa es justo lo que el resultado por operación existe para evitar. La otra mitad —un lote,
+   un turno de caja— llega con SYN-02, que es cuando el turno entra al lote.
 
 ---
 
@@ -268,7 +282,16 @@ Encaja con el principio del lote —transporta **hechos**, no interacciones— y
 offline viaja como *la orden con sus líneas* más *su cierre*, no como el replay de los toques del
 cajero.
 
-**El hueco, nombrado:** un **descuento aplicado offline no puede viajar todavía**, porque el hecho
+**El hueco más ancho, y no es el descuento: el hecho viaja sin su momento.** El lote no transporta
+`occurredAt`, así que una venta del viernes sincronizada el lunes queda fechada el lunes —para el
+kardex, para el arqueo y para cualquier reporte por fecha—. Afecta a **todas** las ventas offline,
+no solo a las que llevan descuento, y es la contradicción de fondo con "el lote transporta hechos":
+un hecho sin su momento es media verdad. Resolverlo exige que Ventas acepte el instante del cliente,
+lo que abre una decisión propia (¿se confía en el reloj del dispositivo? ¿se acota su desvío?), así
+que **no se resolvió en SYN-01 y hay que decidirlo antes de que el POS real opere días sin
+conexión**.
+
+**El otro hueco:** un **descuento aplicado offline no puede viajar todavía**, porque el hecho
 "orden creada" no sabe expresarlo (`CreateOrderItemInput` no tiene campo de descuento, aunque
 `OrderItem.lineDiscount` exista en la base). Las dos salidas son: que la creación de orden acepte
 descuentos —lo que completa el modelo de "hecho" y mantiene todo idempotente— o darle `clientUuid`
