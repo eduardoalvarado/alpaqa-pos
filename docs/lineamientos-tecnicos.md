@@ -220,6 +220,22 @@ para exponer un agregado sin conceder la tabla. Reglas:
   verifica contra la base (quitar un `GRANT`, una política, el filtro por empresa) y para cualquier
   aserción que "fija" un invariante. En este proyecto ese ejercicio encontró varias pruebas que
   **no podían fallar** por el motivo que declaraban.
+
+  Tres formas de que el ejercicio mienta, las tres vividas acá:
+  1. **La mutación no se aplicó.** Un reemplazo de texto que no coincide deja todo intacto y el
+     verde no significa nada. **Verificar que el archivo cambió** antes de leer el resultado —
+     abortar si no cambió, no seguir.
+  2. **Se restauró con `git checkout`** un archivo que tenía cambios sin commitear, y se los llevó
+     puestos. Para revertir una mutación va **copia de respaldo**, nunca git.
+  3. **Se mutó en la capa equivocada.** Un bug del adapter no lo detecta el spec del caso de uso,
+     porque el adapter no participa: ahí el doble ocupa su lugar. Si la mutación no muerde,
+     preguntarse **en qué nivel vive la garantía** antes de concluir que está cubierta.
+
+- **Un doble que ignora un parámetro vuelve indetectable que nadie se lo pase.** Si el puerto
+  recibe algo, el doble tiene que **registrarlo** aunque no lo use — si no, un caso de uso que se
+  coma el dato pasa en verde. Y las **traducciones** (adapters entre módulos) merecen su propio
+  spec con fakes: fallan perdiendo campos en el camino, y un `execute({...})` al que le falta una
+  clave opcional compila igual.
 - **Verificar una justificación ejecutándola, no leyéndola.** Antes de escribir "esto se recupera
   con X", correr X.
 
