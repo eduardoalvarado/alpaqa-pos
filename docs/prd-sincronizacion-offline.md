@@ -282,21 +282,29 @@ Encaja con el principio del lote —transporta **hechos**, no interacciones— y
 offline viaja como *la orden con sus líneas* más *su cierre*, no como el replay de los toques del
 cajero.
 
-**El hueco más ancho, y no es el descuento: el hecho viaja sin su momento.** El lote no transporta
+> **Los dos huecos de abajo quedaron CERRADOS** (SYN-01b y SYN-01c, con decisión del usuario el
+> 2026-08-31). Se conserva el texto porque explica por qué la solución es la que es.
+
+**~~El hueco más ancho, y no es el descuento~~ — cerrado en SYN-01b: el hecho viajaba sin su momento.** El lote no transporta
 `occurredAt`, así que una venta del viernes sincronizada el lunes queda fechada el lunes —para el
 kardex, para el arqueo y para cualquier reporte por fecha—. Afecta a **todas** las ventas offline,
 no solo a las que llevan descuento, y es la contradicción de fondo con "el lote transporta hechos":
 un hecho sin su momento es media verdad. Resolverlo exige que Ventas acepte el instante del cliente,
 lo que abre una decisión propia (¿se confía en el reloj del dispositivo? ¿se acota su desvío?), así
-que **no se resolvió en SYN-01 y hay que decidirlo antes de que el POS real opere días sin
-conexión**.
+que se decidió aparte: **se guardan los dos momentos**. `openedAt`/`closedAt` son el momento del
+hecho —lo manda el dispositivo— y `recordedAt` es cuándo llegó al servidor. El desvío se acota
+**hacia el futuro** (5 minutos) y no hacia el pasado: un reloj mal puesto no puede fechar ventas en
+un período ya cerrado, pero un dispositivo sí puede haber estado una semana sin conexión, y ese es
+el caso de uso y no el error. El movimiento de stock no necesitó columna nueva: su `created_at` ya
+**es** el momento del hecho.
 
-**El otro hueco:** un **descuento aplicado offline no puede viajar todavía**, porque el hecho
+**El otro hueco — cerrado en SYN-01c:** un **descuento aplicado offline no podía viajar**, porque el hecho
 "orden creada" no sabe expresarlo (`CreateOrderItemInput` no tiene campo de descuento, aunque
-`OrderItem.lineDiscount` exista en la base). Las dos salidas son: que la creación de orden acepte
-descuentos —lo que completa el modelo de "hecho" y mantiene todo idempotente— o darle `clientUuid`
-a `OrderItem`. **Es una decisión de Ventas, no de este dominio**, y hay que tomarla antes de que el
-POS real intente vender con descuento sin conexión.
+`OrderItem.lineDiscount` exista en la base). Se eligió que **la creación de orden acepte descuentos**, en vez de darle `clientUuid` a
+`OrderItem`: completa el modelo de "hecho", mantiene todo idempotente y no agrega operaciones al
+lote. Y la regla del tope por rol **se movió con el dato** —`assertDiscountWithinLimit` vive ahora
+en el dominio y la usan los dos caminos—, porque duplicarla habría sido la forma de que el camino
+offline terminara con un tope distinto del online.
 
 ---
 
