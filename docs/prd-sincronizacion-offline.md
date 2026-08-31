@@ -64,8 +64,16 @@ capacidad y estado del turno, y la creada offline no. A los tres meses hay dos v
 es una orden válida, y la que corre por sync es la que nadie mira.
 
 **Cómo quedó contenida (SYN-01, mejor que lo que este PRD anticipaba):** la dependencia **no**
-atraviesa el módulo. El núcleo de `sync` habla con un puerto propio (`SalesSync`) y **no sabe que
-Ventas existe**; quien lo sabe es **un único adapter** en `sync/infrastructure/sales/`. El beneficio
+atraviesa el módulo. El núcleo de `sync` habla con un puerto propio (`SalesSync`) que usa **tipos propios**
+(`SyncOrderDraft`, con campos opacos) y **no sabe que Ventas existe**; quien lo sabe es **un único
+adapter** en `sync/infrastructure/sales/`. Importar el input del caso de uso ajeno —el primer
+intento— habría hecho que el dominio de `sync` no compilara sin Ventas; es el mismo criterio que ya
+usan `CatalogReader` e `InventoryWriter`.
+
+El adapter mapea **campo por campo, no con un spread**: copiar la carga entera dejaba que el POS
+mandara `openedByUserId` y le atribuyera la venta a otro usuario, algo que el borde HTTP de Ventas
+impide fijándolo desde el token. Ahora el borrador ni siquiera tiene ese campo, así que dejó de ser
+una regla que recordar para ser una que el tipo impone. El beneficio
 no es purismo: el recorrido del lote se prueba con un doble en memoria en vez de levantar medio
 backend, y sumar Cobros (SYN-02) o Facturación (SYN-03) es agregar un puerto, no enredar el que ya
 está.
@@ -161,18 +169,30 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
    rechaza, su pago no se intenta: se reporta como *omitido por dependencia*, no como error
    propio. Reportar `PAYMENT_ORDER_NOT_FOUND` para algo cuya causa es otra operación manda al
    cajero a mirar el lugar equivocado.
-4. **Las reglas de negocio no se relajan por venir de un lote.** Sin excepciones. Si una regla es
+4. **La autorización tampoco se relaja por venir de un lote.** Cada operación exige **su propio
+   permiso**, el mismo que exigiría por HTTP: anular dentro de un lote pide `anular_venta`, igual
+   que `POST /orders/:id/cancel`. El permiso del endpoint es solo `acceso_pos` —la llave de la
+   superficie—; lo demás se verifica por operación y se rechaza sola, sin tumbar el resto. Un
+   permiso único para todo el lote fallaba de las dos maneras: pidiendo `vender`, un cajero sin
+   `anular_venta` anulaba ventas mandando un lote; pidiendo el más alto, un cajero no podía ni
+   sincronizar las suyas.
+5. **La forma de la carga se valida antes de delegar.** El borde HTTP valida el sobre y deja las
+   **reglas** al dominio de destino —eso evita duplicar los DTO de cada módulo—, pero la **forma**
+   se valida en `sync`: sin eso, un `variantId` que no es UUID llega al driver de Postgres,
+   revienta con un error que no es de dominio, y el lote entero responde 500. Como el POS
+   reintenta ante un 500, una sola operación mal formada atascaría la cola para siempre.
+6. **Las reglas de negocio no se relajan por venir de un lote.** Sin excepciones. Si una regla es
    demasiado estricta para operar offline, se cambia la regla —en su dominio, con su HU—, no se
    la esquiva por este camino.
-5. **El correlativo lo asignó el dispositivo** (§6.B). El servidor **no** renumera: acepta el
+7. **El correlativo lo asignó el dispositivo** (§6.B). El servidor **no** renumera: acepta el
    número recibido y avanza su `currentCorrelative` a `max(actual, recibido)`. Renumerar en el
    servidor rompería el ticket que el cliente ya se llevó impreso.
-6. **La bajada es de solo lectura y acotada a la sucursal** del turno. El POS no baja otras
+8. **La bajada es de solo lectura y acotada a la sucursal** del turno. El POS no baja otras
    sucursales ni datos de administración.
-7. **Un dispositivo avisa a las 72 h sin sincronizar, pero no deja de vender** (§11.2). El aviso
+9. **Un dispositivo avisa a las 72 h sin sincronizar, pero no deja de vender** (§11.2). El aviso
    es visible en el POS y el pendiente aparece en `/sync/status`. Cortar la venta al vencer el tope
    sería exactamente el fallo que este dominio existe para evitar.
-8. **Un lote pertenece a un turno de caja y a una sucursal.** No se aceptan operaciones de
+10. **Un lote pertenece a un turno de caja y a una sucursal.** No se aceptan operaciones de
    sucursales distintas en el mismo lote: acota el radio de un error y hace el rechazo legible.
 
 ---
