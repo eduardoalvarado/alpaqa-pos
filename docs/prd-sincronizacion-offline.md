@@ -83,6 +83,12 @@ opacos y un único adapter (`CashboxSyncAdapter`), sin tocar el puerto de Ventas
 lote más allá de sus cuatro `case` nuevos. El `switch` exhaustivo hizo su trabajo: los tipos nuevos
 no compilaban hasta decidir su permiso y su rama.
 
+**Y en SYN-03 con Facturación** (`BillingSync`), que es donde más importa: un comprobante tiene
+reglas con consecuencias legales —orden cerrada y liquidada, uno por orden, la serie activa de la
+caja que cobró, factura con RUC, snapshot de totales— y escribir directo en la base habría creado
+una segunda definición de documento fiscal válido. Eso no es deuda técnica: es un problema con
+SUNAT.
+
 **Regla del dominio:** `sync` no crea entidades. Traduce cada operación del lote a la llamada del
 caso de uso que ya la gobierna —`CreateOrderUseCase`, `RegisterPaymentUseCase`,
 `EmitComprobanteUseCase`…— y colecta el resultado. Si una regla rechaza la operación, el rechazo
@@ -186,6 +192,33 @@ Y la cobertura mejoró respecto de SYN-01: el e2e de cuatro lotes idénticos en 
 de solaparse en la ventana justa, el camino no se ejercitaría), así que lo que la prueba
 garantiza siempre es que ninguna dé 500 y que exista una sola fila de cada cosa.
 
+**SYN-03 encontró el límite de esas pruebas, y no era el que se creía.** La prueba en paralelo solo
+miraba el código de estado, y este contrato **transporta el resultado en el cuerpo**: un rechazo de
+dominio viaja dentro de un 200. Al agregarle la aserción que faltaba —que las cuatro respuestas
+digan `applied`— se puso roja **contra el código real** y destapó tres carreras: cerrar una orden,
+cobrarla y arquear el turno devolvían `rejected` por hechos que sí habían ocurrido. El arreglo es el
+del invariante 1.
+
+**Ninguna de esas ramas se puede forzar desde afuera**: contra la base las requests se serializan
+en el bloqueo de la serie y la ventana no se abre —comprobado por mutación: el e2e pasa con
+cualquiera de ellas borrada—. Así que las cuatro se cubren donde sí son deterministas, con un doble
+que devuelve **una vez** la lectura vieja: tres en el spec de su caso de uso (emitir comprobante,
+cobrar, emitir nota) y la del lote en el suyo, con las dos mitades —el hecho que ya era verdad se
+reporta `applied`, y el que no ocurrió sigue rechazado—. Es la respuesta honesta: cuando el nivel
+caro no puede ejercitar la garantía, se baja al nivel que sí, en vez de dejar una prueba que no
+puede fallar.
+
+### 3.4 SYN-03 tampoco necesitó tabla ni columna
+
+Los dos momentos ya estaban repartidos en las dos tablas: **`issuedAt` es el momento del hecho**
+—cuándo se emitió, lo manda el dispositivo si fue sin conexión— y `createdAt` es cuándo llegó la
+fila. Igual que `CashShift`, y por el mismo motivo: son entidades que ya distinguían el instante
+del negocio del de la fila.
+
+Lo único que cambió en el modelo de dominio es que **`Comprobante` expone su `branchId`**, que la
+tabla siempre tuvo y la entidad no: el lote lo necesita para verificar que sus operaciones no
+mezclen sucursales.
+
 **Qué NO se persiste:** la cola en sí. Los pendientes son **derivados** —`sunatStatus IN
 (GENERADO, RECHAZADO)`—, misma decisión que las métricas (BKO-06) y el onboarding (ADM-08). Una
 tabla-cola paralela al estado del comprobante es una segunda verdad que se desincroniza.
@@ -203,6 +236,7 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
 | **`SyncClock`/temporizador** (nuevo, del lado infra) | Dispara la cola. Aislado tras un puerto para que el caso de uso no dependa de `setInterval` |
 | **`SalesSync`** (SYN-01) | Lo que Ventas le presta al lote: crear, buscar, cerrar y anular una orden |
 | **`CashboxSync`** (SYN-02) | Lo que Cobros le presta al lote: abrir y cerrar turno, buscar turno por UUID de cliente, cobrar, mover efectivo, y **la sucursal de una caja** |
+| **`BillingSync`** (SYN-03) | Lo que Facturación le presta al lote: emitir comprobante **con el número que trae**, buscar comprobante por UUID de cliente, y emitir nota de crédito |
 
 ### 4.2 Invariantes del dominio
 
@@ -214,7 +248,20 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
    alcanza con no duplicar la fila, tiene que no duplicar **sus consecuencias**. Ese trabajo ya
    está hecho del lado del inventario —`registerSale` es idempotente por `orderId`, así que
    reasentar una venta no descuenta stock dos veces—, y es el patrón a verificar en cada
-   consecuencia nueva que una HU sume. El POS reintenta ante cualquier duda —y debe
+   consecuencia nueva que una HU sume.
+
+   **Precisión de SYN-03, y es la más cara del dominio: la idempotencia por estado resultante
+   también tiene ventana de carrera.** El estado se mira en una transacción y se actúa en otra, así
+   que un reenvío que se solapa ve el mundo de antes, intenta la operación y recibe un rechazo que
+   *parece* legítimo —«la orden no se puede cerrar», «la orden ya está liquidada», «ese comprobante
+   ya está anulado»— por un hecho que **sí ocurrió**. El POS lo mostraría como error al cajero. Por
+   eso el estado se mira **dos veces**: antes de delegar, y otra vez cuando el dominio rechaza. Si
+   para entonces el hecho ya es verdad, la operación se reporta `applied`. Con un límite que no se
+   negocia: **los rechazos propios del lote no se reconsideran nunca**. Dar por aplicada una
+   operación que rechazamos por falta de permiso convertiría este camino en la puerta trasera que el
+   invariante 4 cierra. Esa pertenencia la decide el **tipo** (`SyncError`, base de los errores del
+   módulo) y no el prefijo del código: la auditoría de arquitectura señaló que una convención de
+   nombres que nadie verifica se cae en silencio y hacia el lado peligroso. El POS reintenta ante cualquier duda —y debe
    poder hacerlo sin miedo: una respuesta perdida en la red es indistinguible de una operación no
    aplicada.
 2. **El lote se aplica en orden de dependencia.** Un pago no puede aplicarse antes que su orden.
@@ -242,6 +289,20 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
 7. **El correlativo lo asignó el dispositivo** (§6.B). El servidor **no** renumera: acepta el
    número recibido y avanza su `currentCorrelative` a `max(actual, recibido)`. Renumerar en el
    servidor rompería el ticket que el cliente ya se llevó impreso.
+
+   **Construido en SYN-03, con tres precisiones que aparecieron al hacerlo:**
+   - La marca de agua se mueve con un `UPDATE` condicional (`WHERE current_correlative < recibido`):
+     atómico, sin lectura previa y **monótono**. Un lote viejo que llega después de uno nuevo no
+     puede hacer retroceder la serie y volver a repartir números ya entregados.
+   - **La serie se verifica, no se confía.** El papel del cliente dice «B001-000123»: las dos
+     mitades son el documento. Si el dispositivo declara una serie que su caja no emite —una
+     configuración vieja— se rechaza con `COMPROBANTE_SERIES_MISMATCH` en vez de guardar el número
+     bajo otra serie y que el papel deje de coincidir con el registro fiscal.
+   - **Un número reclamado por dos hechos distintos no se resuelve renumerando.** Si el único
+     `(empresa, serie, correlativo)` choca y el `clientUuid` es otro, se rechaza con
+     `COMPROBANTE_CORRELATIVE_TAKEN` para que lo mire un humano. Si el `clientUuid` es el mismo, es
+     un reenvío y se devuelve el documento que ya existe — **sin esa rama, cada reintento quemaría
+     un número fiscal**, que es exactamente lo que esta HU existía para impedir.
 8. **La bajada es de solo lectura y acotada a la sucursal** del turno. El POS no baja otras
    sucursales ni datos de administración.
 9. **Un dispositivo avisa a las 72 h sin sincronizar, pero no deja de vender** (§11.2). El aviso
@@ -277,7 +338,9 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
   una lista y no un campo: con uno solo, el cobro de una orden buena en un turno rechazado se
   intentaba igual y fallaba con «turno inexistente», mandando al cajero a mirar el lugar
   equivocado. Tipos vigentes: `CREATE_ORDER`, `CLOSE_ORDER`, `CANCEL_ORDER` (SYN-01) y
-  `OPEN_SHIFT`, `REGISTER_PAYMENT`, `REGISTER_CASH_MOVEMENT`, `CLOSE_SHIFT` (SYN-02).
+  `OPEN_SHIFT`, `REGISTER_PAYMENT`, `REGISTER_CASH_MOVEMENT`, `CLOSE_SHIFT` (SYN-02) y
+  `EMIT_COMPROBANTE`, `ISSUE_CREDIT_NOTE` (SYN-03, con `comprobanteClientUuid` como tercera
+  referencia: una nota siempre rinde un comprobante concreto).
 
   **Obligación del POS: un lote, un turno.** El invariante 10 hace que el cliente tenga que
   **partir la cola por turno de caja** — un dispositivo que estuvo 72 h sin conexión acumuló varios
@@ -420,6 +483,30 @@ la cola para siempre.
 
 ---
 
+### 6.quater SYN-03: el documento llega con su número puesto
+
+Todo lo demás que el lote empuja pide identidad al servidor. Un comprobante no: **cuando llega ya
+la tiene**, porque el dispositivo le asignó el correlativo y lo imprimió (§6.B). Eso invierte la
+relación —el servidor registra un hecho fiscal que ya existe en papel— y de ahí salen las reglas:
+
+- **No se renumera.** El repositorio usa el número recibido y solo avanza la marca de agua de la
+  serie. La regla vive en **una sola función** (`asignarCorrelativo`) que comparten el comprobante y
+  la nota, porque duplicarla sería la forma de que un día la nota renumere y el comprobante no.
+- **Los importes no viajan.** El comprobante los snapshotea de la orden que factura (§6.A/§6.D);
+  dejar que el lote los declarara abriría la puerta a un documento legal cuyos números no salen de
+  la venta que documenta. El borrador del lote no tiene dónde ponerlos, y un test lo fija.
+- **La cola de contingencia empieza acá sin código nuevo.** Un comprobante emitido offline queda en
+  `GENERADO`, que es exactamente el estado del que SYN-05 va a tirar. No se adelantó nada.
+- **Permiso `emitir_comprobante` para las dos operaciones**, incluida la nota: quemar un número
+  fiscal es acto de quien factura (decisión de FAC-05), y el lote no relaja eso.
+
+**Lo que la HU no arregló, a propósito:** las deudas fiscales de facturación siguen donde estaban
+(§12 del PRD de facturación) — descuento a nivel de orden no facturable, ICBPER en 0. Un comprobante
+que el POS no puede emitir online tampoco lo puede emitir offline, y eso es lo correcto: la regla es
+una sola.
+
+---
+
 ## 7. Costuras dejadas abiertas
 
 - **Worker aparte** para la contingencia (§2.2), si el volumen lo pide.
@@ -430,6 +517,19 @@ la cola para siempre.
   rastro de auditoría que el cliente puede escribir vale menos.
 - **Resolución asistida de conflictos** (que el cajero elija), si los rechazos resultan frecuentes.
   Primero hay que medirlos: `/sync/status` es lo que permite saberlo.
+- **Cota al salto de la marca de agua** (SYN-03, la nombró la auditoría de plan). Hoy la serie
+  avanza a **cualquier** número mayor que reciba, y es irreversible: un dispositivo mal configurado
+  que mande `correlative: 1000000` deja esa serie ahí para siempre, el lote responde `applied` y
+  ningún número menor vuelve a emitirse por el camino online. El PRD prevé ojo humano para el
+  **choque** de números, no para el salto. No se puso una cota porque elegir el número es una
+  decisión de negocio —un dispositivo legítimamente desconectado salta cientos, no millones— y una
+  cota mal elegida rechaza ventas reales. Cuando haya datos de `/sync/status`, la forma es una cota
+  **relativa** (`recibido ≤ actual + N`) que mande el caso raro a revisión en vez de aplicarlo en
+  silencio.
+- **`leerMomento` mira el reloj del proceso**, no el puerto `Clock` que los lineamientos §2.3
+  declaran obligatorio (viene de SYN-01b). Importa más desde SYN-03, porque ese instante ahora fecha
+  un documento legal: el desvío hacia el futuro se acota contra `Date.now()` y no contra un reloj
+  inyectable, así que el borde no se puede probar con un reloj congelado.
 
 ---
 
@@ -451,7 +551,7 @@ la cola para siempre.
 |---|---|
 | `SYN-01` | Módulo `sync` + `POST /sync/batch` con `CREATE_ORDER` / `CLOSE_ORDER` / `CANCEL_ORDER`: orden de dependencia, resultado por operación, idempotencia verificada por reenvío del mismo lote contra la BD real |
 | `SYN-02` | El lote acepta caja: `OPEN_SHIFT` / `REGISTER_PAYMENT` / `REGISTER_CASH_MOVEMENT` / `CLOSE_SHIFT` delegando en Cobros, con el turno **nombrado** por el lote (§6.ter), el momento del hecho en turno/cobro/movimiento, «un lote, un turno» verificado antes de causar efecto, y el arqueo idempotente ante el reenvío |
-| `SYN-03` | El lote acepta comprobantes y notas, respetando el correlativo del dispositivo y avanzando el high-water mark |
+| `SYN-03` | `EMIT_COMPROBANTE` / `ISSUE_CREDIT_NOTE` delegando en Facturación: el número del dispositivo se respeta, la marca de agua avanza **solo hacia adelante**, la serie se verifica contra la caja, el reenvío **no consume un número nuevo** (ni el solapado), y el momento del hecho es el de la emisión |
 | `SYN-04` | `GET /sync/working-set`: catálogo de la sucursal, mesas y turno abierto, con `since` |
 | `SYN-05` | Cola de contingencia SUNAT: `SunatDispatch`, backoff con tope, `POST /sync/sunat/flush` |
 | `SYN-06` | `GET /sync/status` + el rechazo legible de los dos conflictos reales (mesa, turno) |
@@ -471,7 +571,9 @@ mutation-testing de cada garantía nueva → commit → push → mover el ticket
 **Riesgos a vigilar:**
 - **SYN-01** define la forma del lote. Equivocarse ahí se paga en las cinco HU siguientes.
 - **SYN-03** toca numeración legal. El test que importa no es que el comprobante se cree: es que
-  reenviar el mismo lote **no consuma un correlativo nuevo**.
+  reenviar el mismo lote **no consuma un correlativo nuevo**. **Cubierto**: el e2e verifica contra
+  la BD real que `currentCorrelative` no se mueve al reenviar, ni con el reenvío secuencial ni con
+  cuatro lotes en paralelo.
 - **SYN-01/02** heredan idempotencia de consecuencias ya resuelta en inventario; hay que
   verificar que cada consecuencia nueva la tenga, no asumirlo. **Verificado en SYN-02**: la
   consecuencia nueva es el **arqueo**, y el e2e comprueba contra la BD real que reenviar la jornada

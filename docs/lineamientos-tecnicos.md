@@ -241,6 +241,11 @@ para exponer un agregado sin conceder la tabla. Reglas:
   candidatos tienen que ser **distinguibles** —dos filas creadas en el mismo milisegundo hacen que
   «la más reciente» sea cualquiera de las dos—. Esa prueba pasaba en verde con la garantía rota, y
   lo descubrió el mutation-testing.
+- **Si la respuesta lleva el resultado en el cuerpo, mirar solo el código de estado no prueba
+  nada.** Un contrato que responde 200 con el detalle por operación puede estar reportando un
+  rechazo dentro de ese 200, y una prueba que solo asevera `expect(200)` lo da por bueno. Pasó con
+  las pruebas de concurrencia del lote offline: al agregarles la aserción del resultado por
+  operación se pusieron rojas **contra el código real** y destaparon tres carreras.
 - **Un doble que ignora un parámetro vuelve indetectable que nadie se lo pase.** Si el puerto
   recibe algo, el doble tiene que **registrarlo** aunque no lo use — si no, un caso de uso que se
   coma el dato pasa en verde. Y las **traducciones** (adapters entre módulos) merecen su propio

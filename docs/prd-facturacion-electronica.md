@@ -238,6 +238,14 @@ Todas las tablas son **tenant** (`companyId` + RLS en dos capas, invariante 4 / 
 2. **Correlativo sin huecos por serie, asignado local al emitir** (§6.B): al emitir se toma
    `currentCorrelative + 1` de la serie de forma **atómica** (transacción + bloqueo de fila);
    el número se imprime al instante. No hay coordinación entre cajas.
+
+   **Precisión de SYN-03: "sin huecos" es una garantía del camino online.** Cuando el comprobante
+   se emitió **sin conexión**, el número lo asignó el dispositivo y ya está impreso en el papel del
+   cliente, así que el servidor no renumera: acepta el recibido y avanza la serie a
+   `max(actual, recibido)`. Lo que garantiza entonces es **monotonía**, no continuidad — un lote que
+   se rechaza deja su hueco, y el hueco es del papel, no de la base. La regla de asignación vive en
+   una sola función (`asignarCorrelativo`) que comparten comprobante y nota; el detalle y sus
+   motivos están en el PRD de Sincronización §4.2 invariante 7.
 3. **Todo número consumido se rinde** (§6.B): anular un comprobante emitido → **nota de crédito**;
    el número queda quemado, **nunca se reusa ni se salta**. Un `RECHAZADO` se corrige y reenvía o
    se da de baja; el número no desaparece.
