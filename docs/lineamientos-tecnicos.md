@@ -221,7 +221,7 @@ para exponer un agregado sin conceder la tabla. Reglas:
   aserción que "fija" un invariante. En este proyecto ese ejercicio encontró varias pruebas que
   **no podían fallar** por el motivo que declaraban.
 
-  Tres formas de que el ejercicio mienta, las tres vividas acá:
+  Cuatro formas de que el ejercicio mienta, las cuatro vividas acá:
   1. **La mutación no se aplicó.** Un reemplazo de texto que no coincide deja todo intacto y el
      verde no significa nada. **Verificar que el archivo cambió** antes de leer el resultado —
      abortar si no cambió, no seguir.
@@ -230,7 +230,17 @@ para exponer un agregado sin conceder la tabla. Reglas:
   3. **Se mutó en la capa equivocada.** Un bug del adapter no lo detecta el spec del caso de uso,
      porque el adapter no participa: ahí el doble ocupa su lugar. Si la mutación no muerde,
      preguntarse **en qué nivel vive la garantía** antes de concluir que está cubierta.
+  4. **El rojo vino de otra cosa.** Correr la prueba mutada con `-t` la separa de los tests que le
+     **siembran los datos**: falla porque la fila no existe, no porque la garantía se rompió, y el
+     verde de después no significa nada. Mismo efecto con cualquier filtro que altere el estado
+     previo. Se muta **corriendo el archivo entero**, y se mira **qué test** se puso rojo — que sea
+     el que declara la garantía, no otro.
 
+- **Una prueba que depende de un desempate no determinista pasa con la mutación puesta.** Si lo
+  que se quiere fijar es «se usó el que le dijeron y no el que el servidor habría elegido», los dos
+  candidatos tienen que ser **distinguibles** —dos filas creadas en el mismo milisegundo hacen que
+  «la más reciente» sea cualquiera de las dos—. Esa prueba pasaba en verde con la garantía rota, y
+  lo descubrió el mutation-testing.
 - **Un doble que ignora un parámetro vuelve indetectable que nadie se lo pase.** Si el puerto
   recibe algo, el doble tiene que **registrarlo** aunque no lo use — si no, un caso de uso que se
   coma el dato pasa en verde. Y las **traducciones** (adapters entre módulos) merecen su propio

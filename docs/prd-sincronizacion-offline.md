@@ -78,6 +78,11 @@ no es purismo: el recorrido del lote se prueba con un doble en memoria en vez de
 backend, y sumar Cobros (SYN-02) o Facturación (SYN-03) es agregar un puerto, no enredar el que ya
 está.
 
+**Confirmado en SYN-02**: Cobros entró como un segundo puerto (`CashboxSync`) con sus propios tipos
+opacos y un único adapter (`CashboxSyncAdapter`), sin tocar el puerto de Ventas ni el recorrido del
+lote más allá de sus cuatro `case` nuevos. El `switch` exhaustivo hizo su trabajo: los tipos nuevos
+no compilaban hasta decidir su permiso y su rama.
+
 **Regla del dominio:** `sync` no crea entidades. Traduce cada operación del lote a la llamada del
 caso de uso que ya la gobierna —`CreateOrderUseCase`, `RegisterPaymentUseCase`,
 `EmitComprobanteUseCase`…— y colecta el resultado. Si una regla rechaza la operación, el rechazo
@@ -143,6 +148,44 @@ puede resultar **vacuo** si las requests no se solapan en la ventana justa. Est�
 propio test. Cerrarlo de verdad exigiría una prueba a nivel de repositorio con contexto de tenant
 abierto a mano; se anota como deuda antes que fingir que está probado.
 
+### 3.3 SYN-02: ninguna tabla nueva, y una columna que la auditoría rescató
+
+El momento del hecho de la caja ya tenía dónde vivir, y el reparto quedó igual que en SYN-01b:
+
+- **`CashShift.openedAt` / `closedAt` son el momento del hecho** —lo manda el dispositivo si el
+  turno se abrió o se arqueó sin conexión— y `createdAt`/`updatedAt` son cuándo llegó al servidor.
+  No hizo falta un `recordedAt`: a diferencia de `Order`, esta tabla ya tenía separados el momento
+  del negocio y el de la fila.
+- **`Payment.createdAt` y `CashMovement.createdAt` son el momento del hecho**, mismo criterio que el
+  movimiento de stock en SYN-01b: son asientos, y el instante del asiento **es** el del hecho.
+- **`Payment.recordedAt` y `CashMovement.recordedAt` son nuevas** (migración `syn02_recorded_at`).
+  El primer intento las dio por innecesarias apoyándose en el precedente del movimiento de stock, y
+  la auditoría de arquitectura lo objetó con el argumento correcto: al dejar que el lote fijara
+  `created_at` se **borró el sello del servidor**, y estos son los registros del arqueo, fechados
+  por el **reloj del dispositivo** —que se acepta sin cota hacia el pasado, porque una semana sin
+  conexión es el caso de uso—. Sin `recorded_at` no quedaba ningún dato del servidor sobre un
+  movimiento de dinero, y la diferencia entre los dos momentos es justo lo que permite ver que un
+  dispositivo estuvo días sin sincronizar (lo que `GET /sync/status` va a mostrar en SYN-06).
+  `CashShift` no la necesitó: ya tenía separados el momento del negocio (`opened_at`/`closed_at`) y
+  el de la fila (`created_at`).
+- El `GRANT` no cambió en ninguna de las tres tablas: son de tabla, no por columna. (Sí hay que
+  recordar que Prisma manda las columnas con `@default` **nombradas** en el `INSERT`, lineamientos
+  §2.4, así que un `GRANT` por columna sí habría tenido que incluirlas.)
+
+**Actualización SYN-02:** el mismo backstop bajó a la base para **turno, cobro y
+movimiento** —`P2002` → releer por `clientUuid`; y si al abrir turno el que chocó fue el
+índice parcial `WHERE status='OPEN'`, `SHIFT_ALREADY_OPEN`—, y el **cierre** dejó de
+poder pisar un arqueo firmado: cierra con `UPDATE ... WHERE id = ? AND status = 'OPEN'` y
+decide por las filas afectadas. Sin eso, dos cierres solapados reescribían el arqueo,
+chocaban al insertar el desglose por método, tumbaban el lote con un 500 y **reimprimían
+el reporte Z**.
+
+Y la cobertura mejoró respecto de SYN-01: el e2e de cuatro lotes idénticos en paralelo
+**sí muerde hoy** —comprobado por mutación: quitando el `catch` del `P2002` o el guard del
+`UPDATE`, se pone rojo con un 500—. La reserva se mantiene igual (si las requests dejaran
+de solaparse en la ventana justa, el camino no se ejercitaría), así que lo que la prueba
+garantiza siempre es que ninguna dé 500 y que exista una sola fila de cada cosa.
+
 **Qué NO se persiste:** la cola en sí. Los pendientes son **derivados** —`sunatStatus IN
 (GENERADO, RECHAZADO)`—, misma decisión que las métricas (BKO-06) y el onboarding (ADM-08). Una
 tabla-cola paralela al estado del comprobante es una segunda verdad que se desincroniza.
@@ -158,6 +201,8 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
 | **`Clock`** (kernel) | `nextAttemptAt`, backoff. Inyectado, no `Date.now()`: el backoff se prueba sin esperar |
 | **`PsePort`** (Facturación, existente) | El envío real. `sync` **no** habla con SUNAT: reintenta lo que Facturación ya sabe enviar |
 | **`SyncClock`/temporizador** (nuevo, del lado infra) | Dispara la cola. Aislado tras un puerto para que el caso de uso no dependa de `setInterval` |
+| **`SalesSync`** (SYN-01) | Lo que Ventas le presta al lote: crear, buscar, cerrar y anular una orden |
+| **`CashboxSync`** (SYN-02) | Lo que Cobros le presta al lote: abrir y cerrar turno, buscar turno por UUID de cliente, cobrar, mover efectivo, y **la sucursal de una caja** |
 
 ### 4.2 Invariantes del dominio
 
@@ -206,16 +251,42 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
    de lo aplicado evita que un encabezado mienta sobre el contenido—, y una operación de otra
    sucursal se rechaza con `SYNC_MIXED_BRANCH`. **Se rechaza la operación, no el lote**
    (precisión de SYN-01 sobre el enunciado original): tirar abajo ventas legítimas por una fila
-   intrusa es justo lo que el resultado por operación existe para evitar. La otra mitad —un lote,
-   un turno de caja— llega con SYN-02, que es cuando el turno entra al lote.
+   intrusa es justo lo que el resultado por operación existe para evitar.
+
+   **La otra mitad —un lote, un turno de caja— la cerró SYN-02**, y con una precisión que importa:
+   el turno del lote se lleva **por UUID de cliente**, no por id del servidor. El id recién existe
+   *después* de abrir el turno, así que verificar con él obligaría a rechazar una operación cuyo
+   efecto ya ocurrió — un turno realmente abierto dentro de una operación reportada como
+   rechazada, y esa caja no admitiría un turno nuevo nunca más. Por el mismo motivo, la sucursal de
+   un `OPEN_SHIFT` se pregunta a la caja **antes** de abrir (`CashboxSync.findRegisterBranch`).
+   Regla general que deja la HU: **cuando el efecto no se puede deshacer, el invariante se verifica
+   antes de causarlo, no después**.
 
 ---
 
 ## 5. Contrato de API
 
 ### Empuje
-- **`POST /sync/batch`** — cuerpo: `{ deviceId, operations: [...] }`. Cada operación lleva su
-  `type`, su `clientUuid` y su carga. Respuesta: **un resultado por operación**
+- **`POST /sync/batch`** — cuerpo: `{ operations: [...] }`. **No hay `deviceId`**: este PRD lo
+  anunciaba y el DTO nunca lo declaró, así que un `deviceId` enviado se descartaba en silencio.
+  Se corrige acá en vez de agregarlo: hoy no lo usa nadie, y el dispositivo del que vino un lote es
+  un dato que recién hace falta en `GET /sync/status` (SYN-06). Se agrega ahí, con su consumidor.
+  El resto del cuerpo: Cada operación lleva su
+  `type`, su `clientUuid` y su carga; y su **referencia a lo que depende**: `orderClientUuid`
+  (SYN-01) y `shiftClientUuid` (SYN-02). Un cobro depende de las dos, y por eso la dependencia es
+  una lista y no un campo: con uno solo, el cobro de una orden buena en un turno rechazado se
+  intentaba igual y fallaba con «turno inexistente», mandando al cajero a mirar el lugar
+  equivocado. Tipos vigentes: `CREATE_ORDER`, `CLOSE_ORDER`, `CANCEL_ORDER` (SYN-01) y
+  `OPEN_SHIFT`, `REGISTER_PAYMENT`, `REGISTER_CASH_MOVEMENT`, `CLOSE_SHIFT` (SYN-02).
+
+  **Obligación del POS: un lote, un turno.** El invariante 10 hace que el cliente tenga que
+  **partir la cola por turno de caja** — un dispositivo que estuvo 72 h sin conexión acumuló varios
+  turnos y no puede mandarlos juntos: del segundo en adelante se rechazan con `SYNC_MIXED_SHIFT`.
+  Es una obligación del contrato, no un rechazo de negocio, y se escribe acá porque la app POS la
+  tiene que implementar (lo señaló la auditoría de plan: `rejected` significa «mostrale esto al
+  cajero», y este caso significa «reloteá»). Si en la práctica resultara incómodo, la alternativa
+  es relajar el invariante 10 a «un lote, una sucursal» y dejar que cada operación de caja lleve su
+  turno — se decide con datos de `/sync/status`, no antes. Respuesta: **un resultado por operación**
   (`applied` / `rejected` / `skipped`), con el id del servidor cuando aplica y el código de error
   de dominio cuando no. **Tres resultados, no cuatro** (corregido al construir SYN-01): se
   evaluó distinguir `duplicate` de `applied` y se descartó — para el POS son el mismo hecho («ya
@@ -308,6 +379,47 @@ offline terminara con un tope distinto del online.
 
 ---
 
+### 6.ter SYN-02: el turno se nombra, no se deduce
+
+Cobrar por HTTP no dice en qué turno cae el cobro: lo **deduce** el servidor —el turno `OPEN` del
+cajero en la sucursal— y está bien, porque online hay uno solo posible. El lote no puede hacer eso:
+un cobro del viernes que sincroniza el lunes caería en el turno del lunes y cuadraría un arqueo que
+no es el suyo, **sin que nada fallara**. Es la misma clase de error que el momento del hecho
+(SYN-01b), pero sobre el agregado en vez de sobre la fecha.
+
+Por eso el lote **nombra** el turno (`shiftClientUuid`) y `RegisterPaymentUseCase` acepta un
+`cashShiftId` explícito. Lo que la deducción garantizaba por construcción pasa a verificarse:
+
+- el turno tiene que ser **del cajero** y de la **sucursal de la orden**, o el lote sería la forma de
+  meter un cobro en el turno de otro (`PAYMENT_SHIFT_MISMATCH`, 409);
+- y tiene que **seguir abierto**: un turno cerrado ya se arqueó, y un cobro posterior cambiaría un
+  cierre firmado (`SHIFT_NOT_OPEN`). El cobro rezagado se rechaza contra **su** turno en vez de
+  colarse en el de hoy, que es exactamente el resultado que se busca.
+
+**La consecuencia idempotente de esta HU es el arqueo.** Reenviar el lote no puede recalcularlo:
+`CLOSE_SHIFT` sobre un turno ya `CLOSED` se reporta `applied` sin volver a llamar a Cobros —si no,
+el cierre se recalcularía y el reporte Z se reimprimiría—. Es el mismo corte que SYN-01 hizo con el
+cierre de orden, y por el mismo motivo.
+
+**Permiso por operación** (invariante 4), sin novedades de vocabulario: `OPEN_SHIFT` y
+`REGISTER_CASH_MOVEMENT` piden `operar_caja`, `REGISTER_PAYMENT` pide `cobrar`, y `CLOSE_SHIFT`
+pide `cerrar_caja`. Un cajero que no arquea no puede arquear mandando un lote.
+
+**La forma del importe también es una regla que no se relaja.** El borde online exige a lo sumo
+4 decimales (las columnas son `numeric(12,4)`); el lote exige lo mismo. Sin la cota de escala, un
+`0.000012345` entraba por el lote y Postgres lo redondeaba **en silencio** mientras online era un
+400; sin la cota de magnitud, el importe desbordaba la columna con un error que **no es de dominio**
+y tumbaba el lote con un 500 —el fallo que la validación de forma existe para evitar—.
+
+**Los enums viajan opacos.** `method` y `type` cruzan el dominio de `sync` como `string` —importar
+los enums de Cobros haría que `sync` no compile solo— y es el **adapter** quien verifica que el
+valor exista, porque es el único archivo que puede mirar esa lista sin copiarla. Sin esa
+verificación, un método inventado llega al driver de Postgres, da un error que no es de dominio y el
+lote entero responde 500: como el POS reintenta ante un 500, una sola operación mal formada atasca
+la cola para siempre.
+
+---
+
 ## 7. Costuras dejadas abiertas
 
 - **Worker aparte** para la contingencia (§2.2), si el volumen lo pide.
@@ -338,7 +450,7 @@ offline terminara con un tope distinto del online.
 | HU | Entregable |
 |---|---|
 | `SYN-01` | Módulo `sync` + `POST /sync/batch` con `CREATE_ORDER` / `CLOSE_ORDER` / `CANCEL_ORDER`: orden de dependencia, resultado por operación, idempotencia verificada por reenvío del mismo lote contra la BD real |
-| `SYN-02` | El lote acepta caja: turnos, pagos y movimientos (delegando en Cobros) |
+| `SYN-02` | El lote acepta caja: `OPEN_SHIFT` / `REGISTER_PAYMENT` / `REGISTER_CASH_MOVEMENT` / `CLOSE_SHIFT` delegando en Cobros, con el turno **nombrado** por el lote (§6.ter), el momento del hecho en turno/cobro/movimiento, «un lote, un turno» verificado antes de causar efecto, y el arqueo idempotente ante el reenvío |
 | `SYN-03` | El lote acepta comprobantes y notas, respetando el correlativo del dispositivo y avanzando el high-water mark |
 | `SYN-04` | `GET /sync/working-set`: catálogo de la sucursal, mesas y turno abierto, con `since` |
 | `SYN-05` | Cola de contingencia SUNAT: `SunatDispatch`, backoff con tope, `POST /sync/sunat/flush` |
@@ -361,7 +473,9 @@ mutation-testing de cada garantía nueva → commit → push → mover el ticket
 - **SYN-03** toca numeración legal. El test que importa no es que el comprobante se cree: es que
   reenviar el mismo lote **no consuma un correlativo nuevo**.
 - **SYN-01/02** heredan idempotencia de consecuencias ya resuelta en inventario; hay que
-  verificar que cada consecuencia nueva la tenga, no asumirlo.
+  verificar que cada consecuencia nueva la tenga, no asumirlo. **Verificado en SYN-02**: la
+  consecuencia nueva es el **arqueo**, y el e2e comprueba contra la BD real que reenviar la jornada
+  no crea un segundo turno, ni un segundo cobro, ni recalcula el cierre.
 - **SYN-04** es la primera respuesta grande del proyecto. Hay que medir su tamaño con un catálogo
   realista antes de darla por buena.
 - La dependencia `sync → módulos de dominio` es nueva en el proyecto (§2.1): conviene que la
