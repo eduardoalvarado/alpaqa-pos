@@ -500,10 +500,13 @@ relación —el servidor registra un hecho fiscal que ya existe en papel— y de
 - **Permiso `emitir_comprobante` para las dos operaciones**, incluida la nota: quemar un número
   fiscal es acto de quien factura (decisión de FAC-05), y el lote no relaja eso.
 
-**Lo que la HU no arregló, a propósito:** las deudas fiscales de facturación siguen donde estaban
-(§12 del PRD de facturación) — descuento a nivel de orden no facturable, ICBPER en 0. Un comprobante
-que el POS no puede emitir online tampoco lo puede emitir offline, y eso es lo correcto: la regla es
-una sola.
+**Lo que SYN-03 no arregló, y por qué se arregló enseguida:** un comprobante que el POS no puede
+emitir online tampoco lo puede emitir offline —la regla es una sola, y eso es lo correcto—, pero una
+de esas deudas se volvió urgente por culpa de este dominio. SYN-01c habilitó descuentos sin
+conexión y el descuento a nivel de orden **no era facturable**, así que el POS podía imprimir una
+boleta offline que el servidor rechazaría siempre: un documento en manos del cliente que no existe
+para SUNAT, que es peor que un hueco de correlativos. Se cerró en **FAC-07** (prorrateo del
+descuento por línea). ICBPER en 0 sigue abierta y no tiene esta urgencia: no impide emitir.
 
 ---
 

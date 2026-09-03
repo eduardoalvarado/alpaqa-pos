@@ -445,10 +445,48 @@ había dejado registrada.
    bolsa ni la tasa ICBPER, así que `ComprobanteItem.icbperAmount` es siempre `null` y
    `Comprobante.otrosTributos` siempre 0. La columna y el campo ya existen — falta llevar el dato
    desde catálogo hasta la línea de la orden.
-2. **Descuentos a nivel de orden (SAL-03) no son facturables.** Si `Σ lineTotal ≠ order.total` la
-   emisión se **rechaza** (`ORDER_NOT_INVOICEABLE`) en vez de falsear el IGV. Falta **prorratear el
-   descuento por línea** antes de desglosar. Es la deuda más dura del dominio: hoy una orden con
-   descuento global no se puede facturar.
+2. **Descuentos a nivel de orden: CERRADA por FAC-07** (2026-09-02). Era la deuda más dura del
+   dominio —una orden con descuento global no se podía facturar— y se cerró prorrateando el
+   descuento **entre las líneas, antes de desglosar el IGV**: el impuesto se calcula sobre lo que el
+   cliente pagó, no sobre el bruto.
+
+   El reparto es **proporcional al importe de cada línea** y cuadra **exacto** con lo que Caja
+   cobró: los céntimos que el redondeo trunca se devuelven de a uno a las líneas con mayor resto,
+   así el ajuste es de un céntimo por línea como mucho en vez de acumularse todo sobre la última.
+   La regla vive en `order-discount-proration.ts` (pura, con su spec) y el chequeo
+   `Σ líneas == order.total` **se conserva como backstop**: ya no lo dispara un descuento, y si
+   salta es que las líneas, el descuento y el total no cierran — emitir un documento legal con
+   números que no cuadran es peor que no emitirlo.
+
+   **Por qué se priorizó:** SYN-01c habilitó descuentos sin conexión, así que el POS podía imprimir
+   una boleta offline por una venta con descuento global y el servidor la iba a rechazar
+   **siempre**. Eso deja al cliente con un documento en la mano que no existe para SUNAT — peor que
+   un hueco de correlativos.
+
+   **La primera versión cerró la deuda a medias, y lo encontraron las auditorías.** Repartía en
+   céntimos, y este sistema maneja dinero con **4 decimales**: el borde de Ventas acepta descuentos
+   de 4 decimales y la venta por peso produce importes de línea con 4 por su cuenta. Un 10% sobre
+   15.55 —descuento de 1.555— dejaba un residuo que no era múltiplo de la unidad, la suma no
+   cuadraba y el comprobante se rechazaba igual: el callejón sobrevivía justo en el caso más
+   probable. El reparto trabaja ahora en la **unidad mínima del sistema**, y la aritmética vive en
+   `Money.allocate` —repartir un importe entre pesos proporcionales sumando exacto es dinero, no
+   regla de facturación—, con la regla de negocio (qué se reparte, cuándo no se puede) del lado del
+   dominio.
+
+   **Decisión que la HU fijó y conviene tener escrita:** un descuento que **iguala o supera** el
+   importe de las líneas se rechaza. Un comprobante de importe cero ante SUNAT es otra cosa —una
+   transferencia gratuita, con su propio tratamiento— y no un documento de venta que este dominio
+   sepa emitir hoy. Se prefiere no emitir antes que emitir un documento que dice algo que nadie
+   decidió. **Costura:** si el negocio necesita regalar mercadería con comprobante, es una HU
+   propia (tipo de operación gratuita), no un ajuste del prorrateo.
+
+   **Costura abierta que el prorrateo hace más visible:** `ComprobanteItem` guarda el `unitPrice`
+   del snapshot y el `lineTotal` ya descontado, y no tiene campo de descuento — así que dentro del
+   documento `cantidad × unitario ≠ importe de línea` cuando hay cualquier descuento. **Ya pasaba
+   con los descuentos por línea** (SAL-03); el de orden lo extiende a todas las líneas. Hoy es
+   invisible (el ticket no imprime el unitario y el PSE es un stub), pero un UBL real exige decidir:
+   o el unitario del comprobante se recalcula, o el descuento viaja como `AllowanceCharge` por
+   línea. **Se decide al cablear el PSE real**, que es quien fija el formato.
 3. **`ENVIADO` no se usa en el MVP.** El stub síncrono va de `GENERADO` directo a
    `ACEPTADO`/`RECHAZADO`; `ENVIADO` es el estado intermedio que estrenará la **cola de contingencia**
    de *Sincronización*. Reenviar solo se permite desde `GENERADO` o `RECHAZADO` (`canSendToSunat`).
