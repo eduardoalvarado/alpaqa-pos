@@ -520,15 +520,33 @@ descuento por línea). ICBPER en 0 sigue abierta y no tiene esta urgencia: no im
   rastro de auditoría que el cliente puede escribir vale menos.
 - **Resolución asistida de conflictos** (que el cajero elija), si los rechazos resultan frecuentes.
   Primero hay que medirlos: `/sync/status` es lo que permite saberlo.
-- **Cota al salto de la marca de agua** (SYN-03, la nombró la auditoría de plan). Hoy la serie
-  avanza a **cualquier** número mayor que reciba, y es irreversible: un dispositivo mal configurado
-  que mande `correlative: 1000000` deja esa serie ahí para siempre, el lote responde `applied` y
-  ningún número menor vuelve a emitirse por el camino online. El PRD prevé ojo humano para el
-  **choque** de números, no para el salto. No se puso una cota porque elegir el número es una
-  decisión de negocio —un dispositivo legítimamente desconectado salta cientos, no millones— y una
-  cota mal elegida rechaza ventas reales. Cuando haya datos de `/sync/status`, la forma es una cota
-  **relativa** (`recibido ≤ actual + N`) que mande el caso raro a revisión en vez de aplicarlo en
-  silencio.
+- **Guardrail contra el salto de la marca de agua** (SYN-03, la nombró la auditoría de plan).
+  Hoy la serie avanza a **cualquier** número mayor que reciba, y es irreversible: un dispositivo mal
+  configurado que mande `correlative: 1000000` deja esa serie ahí para siempre, el lote responde
+  `applied` y del 123 al 999999 quedan **quemados** —números que nunca se emitieron—. El PRD ya
+  prevé ojo humano para el **choque** de números, pero no para el salto.
+  **Decisión tomada con el usuario (2026-09-03), consultada con su contador:** en numeración
+  electrónica la serie **no debe tener saltos** y no existe mecanismo de justificación ante SUNAT,
+  así que el criterio **no** es «tolerar el salto hasta una cota `N` y quemar los números
+  intermedios» (eso *fabrica* el hueco que hay que evitar). El criterio es el inverso: **un número
+  que abre un hueco es una anomalía → se rechaza y se pone en cuarentena para revisión humana, sin
+  avanzar la serie oficial.** La serie se mantiene densa. Esto **cierra también** el punto de
+  «informar números no usados»: el diseño no debe *producir* números no usados, no hay HU de reporte
+  de saltos. En la operación normal no aparece el problema: el dispositivo asigna correlativos
+  densos localmente (1, 2, 3…) por serie, y aunque los documentos lleguen desordenados la serie
+  queda densa. **Invariante del lado del dispositivo que sostiene la densidad** (para el frontend
+  POS): el correlativo se asigna **solo en el instante de emitir e imprimir**, nunca en un borrador,
+  de modo que un pedido cancelado antes de emitirse no consume número y todo número asignado
+  corresponde a un documento impreso que va a sincronizar. *Pendiente de implementación:* el servidor
+  hoy no distingue «rellena un hueco» de «abre un hueco» (solo lleva high-water mark); el guardrail
+  se construye en una HU futura de Sincronización.
+- **Respaldo del dispositivo perdido antes de sincronizar.** Un documento **emitido e impreso** cuyo
+  dispositivo se pierde o se destruye antes del primer sync consumió su número (hay un papel en manos
+  del cliente) pero nunca llega al servidor ni a SUNAT. Esto **no** es un salto que el software pueda
+  evitar —es continuidad operativa, no numeración—. **Recomendación operativa al cliente
+  (2026-09-03):** mientras el dispositivo esté offline, emitir las boletas/tickets **por duplicado**
+  y conservar la copia como respaldo, para que una persona pueda **reconstruir y reemitir** esos
+  documentos si el dispositivo no vuelve. Es recomendación de procedimiento, no garantía del sistema.
 - **`leerMomento` mira el reloj del proceso**, no el puerto `Clock` que los lineamientos §2.3
   declaran obligatorio (viene de SYN-01b). Importa más desde SYN-03, porque ese instante ahora fecha
   un documento legal: el desvío hacia el futuro se acota contra `Date.now()` y no contra un reloj
