@@ -359,10 +359,13 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
   200 con el detalle, porque el POS necesita saber *cuál* falló, no que "algo" falló.
 
 ### Bajada
-- **`GET /sync/working-set?branchId=&since=`** — catálogo de la sucursal con **precios ya
-  resueltos** (§11.3), mesas y turno abierto. `since` permite delta; sin él, completo. Es **el mismo dato** que sirven los endpoints de
-  catálogo y mesas, agrupado en una sola respuesta para que el POS no encadene seis llamadas con
-  conexión intermitente.
+- **`GET /sync/working-set?branchId=&since=`** (permiso `acceso_pos`) — catálogo de la sucursal con
+  **precios ya resueltos** (§11.3), categorías, sus **modificadores**, mesas y turno abierto, en una
+  sola respuesta para que el POS no encadene seis llamadas con conexión intermitente. `since` (ISO
+  8601) da el **delta**: presente → solo lo que cambió desde ese instante, **incluyendo lo
+  desactivado** para que el POS lo quite; ausente → foto completa **solo activa**. La respuesta trae
+  `generatedAt` (sello del servidor) que el POS devuelve como `since` la próxima vez. Detalle del
+  diseño en §6.quinquies. **Implementada en SYN-04.**
 
 ### Contingencia
 - **`POST /sync/sunat/flush`** — empuja la cola de contingencia de la caja (idempotente).
@@ -508,12 +511,63 @@ boleta offline que el servidor rechazaría siempre: un documento en manos del cl
 para SUNAT, que es peor que un hueco de correlativos. Se cerró en **FAC-07** (prorrateo del
 descuento por línea). ICBPER en 0 sigue abierta y no tiene esta urgencia: no impide emitir.
 
+### 6.quinquies SYN-04: la bajada, y el delta que sabe quitar
+
+Las cinco HU anteriores empujan; esta **baja**. `GET /sync/working-set?branchId=&since=` junta en una
+sola respuesta lo que hoy sirven tres superficies —catálogo con **precios ya resueltos** (§11.3),
+mesas y turno abierto— para que un dispositivo con conexión intermitente no encadene seis llamadas.
+Es solo lectura: `acceso_pos`, la misma llave de superficie que el empuje, sin permiso por operación.
+
+- **Tres readers de solo lectura, ningún import de módulo.** Cada fuente tiene su puerto propio
+  (`WorkingSetCatalogReader`/`TablesReader`/`ShiftReader`) con **tipos propios** de `sync`, y su
+  adapter lee las tablas del dominio ajeno en el mismo desplegable (RLS por empresa), el patrón ya
+  avalado para el `CatalogReader` de Ventas. A diferencia del empuje —que **delega en casos de uso**
+  porque escribe y no puede tener dos definiciones de "venta válida"— la bajada es lectura, así que
+  leer las tablas directo es correcto y `sync` no gana ninguna dependencia de módulo nueva.
+- **El precio viaja resuelto, con la regla en un solo lugar de verdad.** El adapter resuelve con
+  `resolveMvpUnitPrice`, un helper puro nuevo en `shared/domain/pricing/` que es ahora la **única**
+  definición de `variant.price ?? product.basePrice`: lo consumen el reader de Ventas, este de
+  Sincronización **y** `MvpPriceResolver` (el `PriceResolver` del catálogo, que le agrega encima la
+  capa de `context`). Antes vivía copiado en los tres. Costura consciente: cuando llegue el precio
+  por horario/lista (§9.bis del maestro), la regla contextual vive en el `PriceResolver`; un reader
+  que necesite el precio contextual deberá atravesar ese puerto, no enriquecer el helper. Duplicar
+  el resolutor en el cliente sería la segunda verdad que este dominio evita.
+- **Semántica del `since`, y por qué el delta debe traer lo inactivo.** Sin `since`, foto completa y
+  **solo lo activo** (dispositivo nuevo). Con `since`, lo que cambió desde ese instante
+  **incluyendo lo desactivado** (`active:false`): filtrarlo dejaría en el POS ítems fantasma que ya
+  no se venden. El POS reemplaza en su copia local lo que baja y quita lo inactivo.
+- **El delta es por producto, pero mira a sus hijos.** Editar una variante o un modificador no toca
+  el `updatedAt` del producto; un delta que filtrara solo por el producto se los perdería. El
+  producto entra si cambió **él o cualquiera de sus variantes/modificadores**, y baja entero. Los
+  modificadores **sí** viajan en la bajada (un POS con cocina no puede armar una orden configurable
+  sin ellos); el delta de un modificador reenvía el producto completo, no el modificador suelto.
+- **`generatedAt` lo sella el servidor (`Clock`), no el proceso.** Es el instante que el POS
+  guarda y devuelve como `since` la próxima vez. A diferencia de `leerMomento` (§7), acá se usó el
+  puerto `Clock` inyectable desde el principio.
+
 ---
 
 ## 7. Costuras dejadas abiertas
 
 - **Worker aparte** para la contingencia (§2.2), si el volumen lo pide.
 - **Delta de bajada por versión**, si `since` por timestamp se queda corto.
+- **La bajada (SYN-04) no valida la sucursal** con un 404 como hace `/stock`: el catálogo es de la
+  empresa (la RLS lo acota) y una `branchId` ajena a la empresa devuelve simplemente mesas y turno
+  vacíos, sin fuga (RLS por empresa). Si algún día se quiere el 404 explícito, hace falta un reader
+  de sucursal.
+- **La bajada no incluye las capacidades de la empresa** (`usaMesas`/`usaCocina`): hoy la presencia
+  de mesas es la señal. Si el POS necesita configurarse por capacidad aun sin mesas cargadas, se
+  agrega un bloque `capabilities` (lectura de `Company`), sin migración.
+- **Ventana de skew entre el reloj de la app y el de la BD (SYN-04, la nombró la auditoría de plan).**
+  El cursor del delta (`generatedAt`) lo sella el **reloj de la app** (`Clock`), mientras el filtro
+  del delta compara contra `updatedAt`, que puebla el **reloj de la BD** (`now()`). Si el reloj de la
+  app va adelantado respecto del de la BD, un cambio de catálogo hecho en esa ventana puede quedar
+  con `updatedAt` menor que el `generatedAt` que el POS reenvía como `since`, y el `gt` lo saltaría
+  en la próxima bajada. Mitiga (no elimina) que `generatedAt` se captura **antes** de las lecturas, y
+  que es catálogo (se auto-cura en el próximo cambio del ítem o en una bajada completa) —no es
+  pérdida de una venta—. Si se quiere cerrar, sellar `generatedAt` con el reloj de la BD (misma
+  fuente que `updatedAt`) en vez del `Clock` de la app. El e2e sí ejercita el round-trip real
+  (`generatedAt` → `since`), que en una sola máquina no expone el skew.
 - **Sincronización de auditoría**: cuando exista el dominio de Auditoría, hay que decidir si sus
   registros viajan en el lote o se generan en el servidor al aplicarlo. **Recomendación
   anticipada:** en el servidor — el actor y el momento de aplicación son datos del servidor, y un
@@ -599,8 +653,11 @@ mutation-testing de cada garantía nueva → commit → push → mover el ticket
   verificar que cada consecuencia nueva la tenga, no asumirlo. **Verificado en SYN-02**: la
   consecuencia nueva es el **arqueo**, y el e2e comprueba contra la BD real que reenviar la jornada
   no crea un segundo turno, ni un segundo cobro, ni recalcula el cierre.
-- **SYN-04** es la primera respuesta grande del proyecto. Hay que medir su tamaño con un catálogo
-  realista antes de darla por buena.
+- **SYN-04** es la primera respuesta grande del proyecto. **Medido (e2e con BD real):** ~60
+  productos con su variante por defecto bajan en ~29,5 KB (~0,5 KB por producto), muy holgado; el
+  e2e lleva una red de seguridad que falla si la respuesta supera 1 MB (caza un cambio que incluya
+  relaciones de más). A escala de miles de productos conviene revisar paginación/compresión, pero el
+  tamaño no es un riesgo en el MVP.
 - La dependencia `sync → módulos de dominio` es nueva en el proyecto (§2.1): conviene que la
   auditoría de arquitectura la mire en SYN-01, no en SYN-06.
 
