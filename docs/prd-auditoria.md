@@ -316,7 +316,7 @@ anotó para tenants, acá es obligatoria de entrada).
 |---|---|
 | `AUD-01` | **Cimiento**: modelo `AuditEvent` + migración (RLS + GRANT append-only + política nominal de backoffice) + puerto `AuditRecorder` (con el **reintento asíncrono acotado + dead-letter a log**) + el mecanismo `@Audit`/interceptor del borde + `Clock`/`IdGenerator`. Se prueba enganchando **una** acción de alto riesgo (anulación de venta) de punta a punta, y **el best-effort en las dos direcciones** (un fallo del rastro no tumba la venta; el reintento recupera el transitorio). **Hecho 2026-09-04** (Jira `ALPQ-78`). El modo **transaccional** para acciones críticas se difiere a **AUD-06** (su único consumidor, la suspensión de tenant) — ver reconciliación en §6 |
 | `AUD-02` | Enganche **Ventas**: anulación, descuento (quién y cuánto), edición de orden, devolución. **Hecho 2026-09-04** (`ALPQ-79`). Acciones `SALES.*` en una constante por dominio (`sales-audit-actions.ts`); rutas decoradas: descuento, agregar/quitar/cambiar-cantidad de ítem, **reasignar mesero** (`SALES.WAITER_ASSIGNED`, accountability sensible — se incluyó por criterio explícito, no por omisión) y devolución (la anulación ya venía de AUD-01). **Crear y cerrar orden NO se auditan** (no son foco de fraude/disputa; costura si se necesita). El interceptor ganó captura de **todos los params de ruta** en `metadata.params`, para no perder el `itemId` de un sub-recurso. Cobertura e2e de descuento, agregar/cambiar-cantidad/quitar ítem y devolución; la de mesero se difiere (misma mecánica ya probada, requiere capacidad `usaMesas`) |
-| `AUD-03` | Enganche **Caja**: apertura/cierre de turno (con la diferencia del arqueo), movimientos de efectivo |
+| `AUD-03` | Enganche **Caja**: apertura/cierre de turno (con la diferencia del arqueo), movimientos de efectivo. **Hecho 2026-09-04** (`ALPQ-80`). Acciones `CASHBOX.*` (`cashbox-audit-actions.ts`): `SHIFT_OPENED`/`SHIFT_CLOSED`/`CASH_MOVEMENT_REGISTERED`, todas contra la entidad **`cash_shift`** (movimiento y cierre cuelgan de su turno → "qué pasó en este turno" en un hilo). El cierre lleva el arqueo (esperado/contado) en `dataAfter`. El interceptor ganó `entityIdFromResponse` (abrir turno: el `:id` de ruta es la caja, no el turno). **Los cobros (`payment`) NO se auditan** — no están en el mapa §9; ver decisión abierta en §12 |
 | `AUD-04` | Enganche **Facturación**: emisión, envío a SUNAT, nota de crédito |
 | `AUD-05` | Enganche **Catálogo/Inventario/Admin** (alcance amplio): cambios de precio, config, flags, movimientos de inventario, y **usuarios/roles/permisos** (alta, cambio de rol, anti-lockout) |
 | `AUD-06` | **Lado operador** (Backoffice): quién suspendió/reactivó un tenant y cambió su plan (cross-deployable, actor `OPERATOR`, política nominal). Cierra la costura BKO-04/05/06 |
@@ -367,3 +367,15 @@ sincroniza o se genera en el servidor. **Ya está contestado: se genera en el se
    cubre el fallo transitorio, no el crash.
 5. **Crítico-transaccional = solo suspensión de tenant** al arranque. Las anulaciones se quedan en el
    nivel default con reintento; su promoción a crítica queda como costura abierta (§7).
+
+---
+
+## 12. Decisiones abiertas (a resolver con el usuario)
+
+- **¿Se auditan los cobros (`payment`)?** El mapa §9 enumera para Caja solo turnos y movimientos de
+  efectivo; los **cobros** (`POST /orders/:orderId/payments`) y, sobre todo, la **anulación de un
+  cobro** (`DELETE /orders/:orderId/payments/:paymentId`) son movimientos de dinero sensibles pero **no aparecen en ninguna
+  fila del §9** (ni Caja ni Facturación). Hoy quedan **sin auditar** (AUD-03 se ciñó a su ticket).
+  **Recomendación:** auditar al menos la anulación de cobro (quemar/deshacer dinero recibido es de lo
+  más sensible), y probablemente el registro de cobro. Es una línea `@Audit` por ruta; el mecanismo ya
+  está. Decisión de alcance del usuario.
