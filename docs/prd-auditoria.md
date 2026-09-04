@@ -80,6 +80,16 @@ quién arma el evento. `datos_antes/datos_despues` completos (diff previo/poster
 borde —no conoce el estado previo—: en el MVP se capturan **parciales** (payload + resultado), y el
 diff rico queda como enriquecimiento por operación (§7).
 
+> **Reconciliación AUD-01 (2026-09-04).** El decorador `@Audit` y su metadata (`AuditMetadata`,
+> `AUDIT_METADATA_KEY`) viven en **`shared/infrastructure/http`**, junto a `@RequirePermission`,
+> `@Public` y `@CurrentUser` —no en `modules/audit`—: los usan los seis dominios y ninguno debe
+> importar un módulo de dominio para declarar que una ruta se audita (mismo criterio que cerró
+> BKO). El `AuditInterceptor` (en `audit`) es quien **lee** esa metadata, igual que el
+> `PermissionsGuard` lee la de permisos. Así "decorar no es depender" es literal: `sales` no importa
+> `audit`. Además el mecanismo se partió en dos puertos por responsabilidad: **`AuditRecorder`** (la
+> red best-effort: reintento + dead-letter) y **`AuditEventRepository`** (el escritor append-only) —
+> así la red de reintento se prueba con un repo en memoria que falla a voluntad, sin base.
+
 ### 2.2 Por qué el interceptor no rompe la regla de dependencias
 
 `audit` expone el puerto `AuditRecorder` y el decorador `@Audit`. El interceptor vive en la infra de
@@ -226,6 +236,17 @@ anotó para tenants, acá es obligatoria de entrada).
     acción a crítica después es marcarla, sin retrabajo (costura de anulación abierta, §7).
   La lista de acciones "críticas transaccionales" se mantiene **explícita** (una constante, no una
   convención implícita) y hoy tiene **un** elemento.
+
+  > **Reconciliación AUD-01 (2026-09-04): el modo transaccional se construye con su consumidor, en
+  > AUD-06.** AUD-01 entrega el **default** completo y probado de punta a punta (best-effort +
+  > reintento asíncrono acotado + dead-letter). El modo transaccional **no** se cableó en AUD-01: su
+  > **único** consumidor de arranque es la suspensión de tenant (`BACKOFFICE.TENANT_SUSPENDED`), que
+  > es cross-deployable y llega en **AUD-06**. Construir el escritor transaccional ahora, sin esa
+  > ruta, sería superficie de puerto sin consumidor ejercitado — el error que este proyecto ya pagó
+  > varias veces (ADM-01: "no agregar superficie por si acaso"). Se difiere deliberadamente a AUD-06,
+  > donde se escribe junto a la acción que lo usa y con su propio test. El `AuditRecorder` best-effort
+  > queda intacto; el transaccional será un camino aparte (escribir en la tx de la acción), no una
+  > variante del recorder.
 - **Actor polimórfico en una tabla, no dos logs** (§2.3, §3). Un solo rastro por empresa, donde el
   dueño ve también las acciones del operador sobre su tenant (transparencia). Dos tablas separadas
   aislarían mejor pero partirían "la historia de esta empresa" en dos lugares y le esconderían al
@@ -242,6 +263,15 @@ anotó para tenants, acá es obligatoria de entrada).
 - **Diff completo `antes/después`.** El MVP captura parcial (§6). Cuando una acción necesite el
   estado previo exacto (p. ej. "qué precio tenía antes"), el caso de uso lo provee por un mecanismo
   explícito; no reescribe el interceptor.
+- **Redacción de datos sensibles en `dataAfter` (respuesta)** (anotado en AUD-01). El interceptor
+  captura dos cosas: la **carga de entrada** (`req.body`) en `metadata.payload` y el **resultado**
+  (la respuesta) en `dataAfter`. Para la carga de entrada, AUD-01 **ya trae** redacción por ruta
+  (`@Audit({ redactBody: [...] })` elimina campos como una contraseña antes de guardar). Lo que
+  **queda abierto** es la **respuesta**: hoy se snapshotea entera y una respuesta con datos sensibles
+  quedaría en `jsonb`. Las rutas auditadas de hoy no devuelven secretos (la anulación devuelve la
+  orden); al ampliar el enganche (`AUD-02..05`) conviene extender la redacción a `dataAfter` o
+  capturar solo un subconjunto. Cerrarlo cuando una ruta auditada **devuelva** algo que no deba
+  quedar en el log.
 - **Spool durable para el crash del proceso** (invariante 4). El reintento asíncrono vive en memoria:
   cubre el fallo transitorio, pero un crash del proceso pierde lo encolado. Un buffer durable local
   (append-log en disco que se relee al arrancar) cerraría ese hueco; es infra extra que para el MVP
@@ -284,7 +314,7 @@ anotó para tenants, acá es obligatoria de entrada).
 
 | HU | Entregable |
 |---|---|
-| `AUD-01` | **Cimiento**: modelo `AuditEvent` + migración (RLS + GRANT append-only + política nominal de backoffice) + puerto `AuditRecorder` (con el **reintento asíncrono acotado + dead-letter a log**) + el modo **transaccional** para acciones críticas + el mecanismo `@Audit`/interceptor del borde + `Clock`/`IdGenerator`. Se prueba enganchando **una** acción de alto riesgo (anulación de venta) de punta a punta, y **el best-effort en las dos direcciones** (un fallo del rastro no tumba la venta; el reintento recupera el transitorio) |
+| `AUD-01` | **Cimiento**: modelo `AuditEvent` + migración (RLS + GRANT append-only + política nominal de backoffice) + puerto `AuditRecorder` (con el **reintento asíncrono acotado + dead-letter a log**) + el mecanismo `@Audit`/interceptor del borde + `Clock`/`IdGenerator`. Se prueba enganchando **una** acción de alto riesgo (anulación de venta) de punta a punta, y **el best-effort en las dos direcciones** (un fallo del rastro no tumba la venta; el reintento recupera el transitorio). **Hecho 2026-09-04** (Jira `ALPQ-78`). El modo **transaccional** para acciones críticas se difiere a **AUD-06** (su único consumidor, la suspensión de tenant) — ver reconciliación en §6 |
 | `AUD-02` | Enganche **Ventas**: anulación, descuento (quién y cuánto), edición de orden, devolución |
 | `AUD-03` | Enganche **Caja**: apertura/cierre de turno (con la diferencia del arqueo), movimientos de efectivo |
 | `AUD-04` | Enganche **Facturación**: emisión, envío a SUNAT, nota de crédito |
