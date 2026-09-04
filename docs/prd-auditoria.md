@@ -130,7 +130,7 @@ del desplegable de backoffice usa el mundo operador; el del desplegable de tenan
 | entityId | uuid NULL | Id de la entidad; `null` para acciones sin una fila (p. ej. un login fallido, si se auditara) |
 | dataBefore | jsonb NULL | Estado previo, **parcial en el MVP** (§2.1). `null` cuando el borde no lo tiene |
 | dataAfter | jsonb NULL | Payload/resultado de la operación (snapshot) |
-| metadata | jsonb NULL | Contexto: ruta, ip, `batch`/`online`, `clientUuid` si vino offline |
+| metadata | jsonb NULL | Contexto: ruta, ip, `mode` (`online`/`batch`/`backoffice`), `payload` de la request (redactable), `clientUuid` si vino offline |
 | createdAt | timestamp | **Momento del registro** (servidor, `Clock`). Para lo offline, el **momento del hecho** viaja en `metadata`/`dataAfter` |
 
 **Append-only:** sin `updatedAt`, sin `UPDATE`, sin `DELETE` desde la app. Un registro de auditoría
@@ -247,6 +247,14 @@ anotó para tenants, acá es obligatoria de entrada).
   > donde se escribe junto a la acción que lo usa y con su propio test. El `AuditRecorder` best-effort
   > queda intacto; el transaccional será un camino aparte (escribir en la tx de la acción), no una
   > variante del recorder.
+  >
+  > **Reconciliación AUD-06 (2026-09-04): el backoffice audita transaccionalmente TODAS sus acciones**
+  > (suspender/reactivar y cambiar plan), no solo la suspensión que §11.5 exige. Motivo: el
+  > desplegable de backoffice **no tiene** la infra de reintento async (es otro proceso, sin el
+  > `AuditRecorder` best-effort ni el cliente de tenant), y sus acciones son de **baja frecuencia**
+  > (un operador administrando tenants), así que la escritura en la misma tx no molesta y da cero
+  > huecos. Es **más estricto** que §11.5, no contradictorio: "suspensión = transaccional" se cumple,
+  > y las demás acciones del operador se suben al mismo nivel por conveniencia de implementación.
 - **Actor polimórfico en una tabla, no dos logs** (§2.3, §3). Un solo rastro por empresa, donde el
   dueño ve también las acciones del operador sobre su tenant (transparencia). Dos tablas separadas
   aislarían mejor pero partirían "la historia de esta empresa" en dos lugares y le esconderían al
@@ -319,7 +327,7 @@ anotó para tenants, acá es obligatoria de entrada).
 | `AUD-03` | Enganche **Caja**: apertura/cierre de turno (con la diferencia del arqueo), movimientos de efectivo. **Hecho 2026-09-04** (`ALPQ-80`). Acciones `CASHBOX.*` (`cashbox-audit-actions.ts`): `SHIFT_OPENED`/`SHIFT_CLOSED`/`CASH_MOVEMENT_REGISTERED`, todas contra la entidad **`cash_shift`** (movimiento y cierre cuelgan de su turno → "qué pasó en este turno" en un hilo). El cierre lleva el arqueo (esperado/contado) en `dataAfter`. El interceptor ganó `entityIdFromResponse` (abrir turno: el `:id` de ruta es la caja, no el turno). **Los cobros (`payment`) NO se auditan** — no están en el mapa §9; ver decisión abierta en §12 |
 | `AUD-04` | Enganche **Facturación**: emisión, envío a SUNAT, nota de crédito. **Hecho 2026-09-04** (`ALPQ-81`). Acciones `BILLING.*` (`billing-audit-actions.ts`): `COMPROBANTE_ISSUED` (emitir, `entityIdFromResponse` — la ruta es `/orders/:orderId/comprobante`), `COMPROBANTE_SENT_TO_SUNAT` (enviar), `CREDIT_NOTE_ISSUED` (nota de crédito). Las tres contra la entidad **`comprobante`** (la nota cuelga de su comprobante de origen → "qué pasó con este comprobante" en un hilo). Entrega (PDF/email) y lecturas (XML/PDF) no se auditan (no son actos fiscales) |
 | `AUD-05` | Enganche **Catálogo/Inventario/Admin** (alcance amplio): cambios de precio, config, flags, movimientos de inventario, y **usuarios/roles/permisos** (alta, cambio de rol, anti-lockout). **Hecho 2026-09-04** (`ALPQ-82`). Tres constantes (`CATALOG_/INVENTORY_/ADMIN_AUDIT_ACTIONS`), **28 rutas** decoradas: Catálogo (categoría CRUD; producto crear/actualizar/tax/measurement/flags; barcode; grupos y modificadores); Inventario (movimiento, stock mínimo); Admin (empresa datos+capacidades; sucursales; roles CRUD; usuarios alta/edición/asignaciones/reset-password; cambio de la propia contraseña). **Bootstrap fuera de alcance** (`POST /auth/register`, `POST /companies`: sin contexto de tenant, el interceptor los omite). **Nuevo `redactResponse`** en el decorador: cierra la costura §7 para las dos respuestas que traen `temporaryPassword` (alta de usuario y reset). `me/password` redacta el body. **`entityIdFromResponse` ahora acepta un dot-path** (`'user.id'` para el alta de usuario, cuya respuesta anida el id; `'variantId'` para movimiento y stock mínimo, cuyas respuestas no traen id propio → el rastro cuelga del stock de la variante); el modificador agregado cuelga de su grupo (`entity:'modifier_group'`). Cobertura e2e representativa (una acción por dominio + prueba de redacción de la temporal + aserción real del `entityId`); el resto reusa el mismo mecanismo ya probado. La auditoría de plan atrapó dos `entityId` que quedaban null (respuesta sin `id` raíz) y un e2e cuyas aserciones de `entityId` no mordían — todo corregido |
-| `AUD-06` | **Lado operador** (Backoffice): quién suspendió/reactivó un tenant y cambió su plan (cross-deployable, actor `OPERATOR`, política nominal). Cierra la costura BKO-04/05/06 |
+| `AUD-06` | **Lado operador** (Backoffice): quién suspendió/reactivó un tenant y cambió su plan (cross-deployable, actor `OPERATOR`, política nominal). Cierra la costura BKO-04/05/06. **Hecho 2026-09-04** (`ALPQ-83`). Acciones `BACKOFFICE.*` (`TENANT_SUSPENDED`/`TENANT_REACTIVATED`/`TENANT_PLAN_ASSIGNED`/`TENANT_PLAN_CLEARED`), entidad `company`. **Modo transaccional real:** el evento se escribe en la **misma transacción** que el cambio (`$transaction` sobre el cliente `alpaqa_backoffice`, GRANT INSERT + política nominal `WITH CHECK(true)`, **sin BYPASSRLS**); si el tenant no existe la tx se revierte entera y no queda rastro. El e2e cross-deployable lo prueba (actor OPERATOR, y 404 → sin rastro). **Los casos de uso importan `stampAuditEvent` del dominio `audit`** — segunda dependencia módulo→módulo deliberada tras `sync→audit`, acotada a tipos puros |
 | `AUD-07` | **Lecturas**: `GET /audit` (dueño, su empresa, `ver_auditoria`) y `GET /backoffice/audit` (operador, cross-tenant), ambas paginadas por cursor |
 | `AUD-08` | Enganche **Sincronización**: el aplicador del lote registra un evento por operación aplicada (actor + acción de esa operación; momento del hecho vs. del registro) |
 
