@@ -187,6 +187,14 @@ para exponer un agregado sin conceder la tabla. Reglas:
   falle cerrado si alguien las consulta. Agregar una "por simetría" abre esa puerta.
 - **Discriminar `P2002` por `meta.target` no es confiable** con el driver adapter: vuelve
   `undefined`. Acotar el `try/catch` a la sentencia que puede chocar, en vez de inferir del mensaje.
+- **`upsert`/`update`/`findUnique`/`delete` se rompen a través del cliente tenant-scoped** (SYN-05,
+  verificado): la extensión envuelve el `where` en `{ AND: [...] }` para acotar por `empresa_id`, y
+  eso es válido para `WhereInput` pero **no** para `WhereUniqueInput`, que exige el campo único al
+  tope (`Argument where needs at least one of id or <unique>`). Por eso todo el backend escribe con
+  `create` / `updateMany` / `deleteMany` / `findMany`/`findFirst`. Un update-or-insert tenant-scoped
+  se hace `updateMany` → si `count === 0`, `create` (con backstop `P2002` → `updateMany`), no
+  `upsert`. Ojo: el `ownerClient()` de los e2e es un `PrismaClient` **crudo** sin la extensión, así
+  que ahí `upsert`/`findUnique` sí andan — no es evidencia de que anden en la app.
 
 ### 2.5 Invariantes del cimiento (del PRD §6) que el código debe garantizar
 

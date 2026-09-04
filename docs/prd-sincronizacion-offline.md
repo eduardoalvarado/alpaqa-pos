@@ -137,12 +137,20 @@ antes de agregar nada:
 | comprobanteId | uuid único | uno por comprobante |
 | attempts | int | cuántas veces se intentó |
 | lastAttemptAt | timestamp NULL | |
-| nextAttemptAt | timestamp | backoff; la cola solo toma los vencidos |
+| nextAttemptAt | timestamp **NULL** | backoff; la cola solo toma los vencidos. **NULL = agotado** (pasó el tope: queda visible pero no se reintenta solo) |
 | lastError | text NULL | el motivo del último rechazo, para que el dueño lo vea |
 
 **Por qué una tabla y no columnas en `Comprobante`:** el comprobante es un documento legal e
 inmutable (§6.D). El estado de una cola de reintentos no es parte del documento; mezclarlos hace
 que cada reintento "toque" una fila que el modelo declara inmutable.
+
+**Reconciliación con §3.4 (implementado en SYN-05): esta tabla no contradice "la cola es
+derivada".** La **membresía** de la cola —qué comprobantes están pendientes— **sí** es derivada
+(`sunatStatus IN (GENERADO, RECHAZADO)`, vía `SENDABLE_SUNAT_STATUSES`, única definición compartida
+con el guard `canSendToSunat`); no hay tabla-cola paralela. `SunatDispatch` guarda solo el **estado
+de reintento** (intentos, backoff, último error), que no es derivable ni puede vivir en el
+comprobante inmutable. Cambio respecto de la tabla original: `nextAttemptAt` pasó a **nullable**
+para expresar "agotado" sin una columna extra.
 
 ### 3.2 Deuda de cobertura que SYN-01 deja anotada
 
@@ -368,7 +376,11 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
   diseño en §6.quinquies. **Implementada en SYN-04.**
 
 ### Contingencia
-- **`POST /sync/sunat/flush`** — empuja la cola de contingencia de la caja (idempotente).
+- **`POST /sync/sunat/flush`** (permiso `acceso_pos`, cuerpo `{ branchId }`) — vacía la cola de
+  contingencia de la sucursal: reintenta los comprobantes reenviables cuyo backoff venció.
+  **Idempotente** (dos corridas seguidas no reenvían lo que no venció). Devuelve un resumen
+  `{ pending, attempted, accepted, rejected, exhausted }`. **Implementado en SYN-05** (detalle en
+  §6.sexties).
 - **`GET /sync/status?branchId=`** — cuántos comprobantes pendientes, el error más reciente, desde
   cuándo. Es lo que el POS y la plataforma muestran como "N comprobantes sin rendir".
 
@@ -545,11 +557,45 @@ Es solo lectura: `acceso_pos`, la misma llave de superficie que el empuje, sin p
   guarda y devuelve como `since` la próxima vez. A diferencia de `leerMomento` (§7), acá se usó el
   puerto `Clock` inyectable desde el principio.
 
+### 6.sexties SYN-05: la cola de contingencia, sin worker
+
+Un comprobante emitido offline queda `GENERADO`; SUNAT recién lo ve cuando el POS reconecta. Esta
+HU reintenta esos envíos. **Disparo:** solo `POST /sync/sunat/flush`, que el propio POS llama al
+sincronizar —**decisión del usuario** ante la contradicción del PRD (§2.2/§4.1 mencionaban un
+temporizador, §8 decía "sin worker")—. El temporizador queda como la costura "mover el disparador"
+para cuando el volumen lo pida; el caso de uso no cambia.
+
+- **`sync` no habla con SUNAT.** Delega en Facturación por un puerto propio (`SunatSender`), como
+  `SalesSync`/`CashboxSync`/`BillingSync`: Facturación ya sabe listar los reenviables y enviar un
+  comprobante con todas sus reglas (guard de estado, persistir CDR, snapshot inmutable). El único
+  adapter conoce Facturación; el resto del módulo habla con el puerto.
+- **La cola es derivada; solo el reintento se persiste.** `SunatDispatch` (tabla nueva, RLS + GRANT)
+  guarda intentos/backoff/último error; los pendientes salen del `sunatStatus`. Ver §3.1.
+- **Backoff exponencial con tope** (valores de construcción, como el cap de lote de 200): 1 min × 4
+  por intento, **techo 2 h** (efectivo: acota el 5º intento, que sin él sería ~4,27 h), **6
+  intentos** y luego **agotado** (`nextAttemptAt` NULL) —visible en
+  `/sync/status` con su motivo, sin reintento automático—. Un rechazo de SUNAT que persiste no se
+  reintenta para siempre.
+- **Idempotente y no se atasca.** Correr flush dos veces no reenvía lo no vencido (lo gatea
+  `nextAttemptAt`); un comprobante aceptado deja de estar pendiente; y el fallo de un comprobante se
+  **aísla** (backoff y sigue) para no frenar el resto de la cola.
+- **Facturación ahora devuelve la glosa del PSE.** `SendComprobanteUseCase` pasó a devolver
+  `{ comprobante, message }`: el `message` se descartaba y es justo lo que la cola guarda como
+  `lastError`. Y `SENDABLE_SUNAT_STATUSES` centralizó "qué está pendiente ante SUNAT" (lo comparten
+  el guard y la consulta de la cola).
+
 ---
 
 ## 7. Costuras dejadas abiertas
 
-- **Worker aparte** para la contingencia (§2.2), si el volumen lo pide.
+- **Worker aparte / temporizador** para la contingencia (§2.2, §6.sexties): SYN-05 dejó solo el
+  disparo por `POST /sync/sunat/flush`. Cuando el volumen lo pida, se agrega el disparador
+  periódico; el caso de uso no cambia.
+- **Un fallo de infraestructura consume presupuesto de reintento** (SYN-05): el `catch` de la cola
+  trata un PSE caído igual que un rechazo de SUNAT —suma un intento con backoff—, así que un corte
+  largo del PSE podría agotar el tope de un comprobante que en realidad nunca fue rechazado. Aceptable
+  en el MVP (el stub no falla); si se vuelve real, distinguir "rechazo de SUNAT" de "no se pudo
+  enviar" para no gastar intentos en lo segundo.
 - **Delta de bajada por versión**, si `since` por timestamp se queda corto.
 - **La bajada (SYN-04) no valida la sucursal** con un 404 como hace `/stock`: el catálogo es de la
   empresa (la RLS lo acota) y una `branchId` ajena a la empresa devuelve simplemente mesas y turno
@@ -628,7 +674,7 @@ Es solo lectura: `acceso_pos`, la misma llave de superficie que el empuje, sin p
 | `SYN-02` | El lote acepta caja: `OPEN_SHIFT` / `REGISTER_PAYMENT` / `REGISTER_CASH_MOVEMENT` / `CLOSE_SHIFT` delegando en Cobros, con el turno **nombrado** por el lote (§6.ter), el momento del hecho en turno/cobro/movimiento, «un lote, un turno» verificado antes de causar efecto, y el arqueo idempotente ante el reenvío |
 | `SYN-03` | `EMIT_COMPROBANTE` / `ISSUE_CREDIT_NOTE` delegando en Facturación: el número del dispositivo se respeta, la marca de agua avanza **solo hacia adelante**, la serie se verifica contra la caja, el reenvío **no consume un número nuevo** (ni el solapado), y el momento del hecho es el de la emisión |
 | `SYN-04` | `GET /sync/working-set`: catálogo de la sucursal, mesas y turno abierto, con `since` |
-| `SYN-05` | Cola de contingencia SUNAT: `SunatDispatch`, backoff con tope, `POST /sync/sunat/flush` |
+| `SYN-05` | **HECHO.** `POST /sync/sunat/flush` reintenta los reenviables vencidos, delegando en Facturación (`SunatSender`); `SunatDispatch` (RLS) guarda intentos/backoff/error, `nextAttemptAt` NULL = agotado; idempotente y aislado por comprobante. Sin worker (solo el disparo del POS) |
 | `SYN-06` | `GET /sync/status` + el rechazo legible de los dos conflictos reales (mesa, turno) |
 
 ---
