@@ -200,6 +200,17 @@ Y la cobertura mejoró respecto de SYN-01: el e2e de cuatro lotes idénticos en 
 de solaparse en la ventana justa, el camino no se ejercitaría), así que lo que la prueba
 garantiza siempre es que ninguna dé 500 y que exista una sola fila de cada cosa.
 
+**Corrección (al cerrar SYN-06): ese e2e no era flaky, era un bug.** Fallaba ~3 de cada 5
+corridas porque `OpenCashShiftUseCase` tenía un **pre-chequeo `findOpenByRegister`** además del
+backstop del repo: un check-then-act clásico. Bajo cuatro lotes idénticos, un lote veía
+`findByClientUuid` null, y para cuando llegaba al pre-chequeo el turno ganador —**su propio
+reenvío**, mismo `clientUuid`— ya estaba abierto, y lo rechazaba con `SHIFT_ALREADY_OPEN`. El
+arreglo es quitar el pre-chequeo y confiar en el backstop de la base, que resuelve el `P2002` de
+forma **atómica** (mismo `clientUuid` → idempotente; otro → `SHIFT_ALREADY_OPEN`); se eliminó
+`findOpenByRegister` del puerto (sin consumidor) y el repo in-memory pasó a espejar ese backstop.
+Es el mismo principio que ya aplicaba el repo de órdenes (SYN-01) y el §6: **idempotencia en la
+base, no en la aplicación**. Verificado: `sync-cash` pasa 6/6 corridas seguidas.
+
 **SYN-03 encontró el límite de esas pruebas, y no era el que se creía.** La prueba en paralelo solo
 miraba el código de estado, y este contrato **transporta el resultado en el cuerpo**: un rechazo de
 dominio viaja dentro de un 200. Al agregarle la aserción que faltaba —que las cuatro respuestas
@@ -338,8 +349,12 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
 ### Empuje
 - **`POST /sync/batch`** — cuerpo: `{ operations: [...] }`. **No hay `deviceId`**: este PRD lo
   anunciaba y el DTO nunca lo declaró, así que un `deviceId` enviado se descartaba en silencio.
-  Se corrige acá en vez de agregarlo: hoy no lo usa nadie, y el dispositivo del que vino un lote es
-  un dato que recién hace falta en `GET /sync/status` (SYN-06). Se agrega ahí, con su consumidor.
+  Se corrige acá en vez de agregarlo. **Al construir SYN-06 (decisión del usuario) `deviceId`
+  siguió sin agregarse:** el `/sync/status` que la HU necesita es **por sucursal** (N pendientes,
+  desde cuándo, último error) y no tiene consumidor para `deviceId`; agregarlo obligaría a
+  snapshotearlo en orden/comprobante sin nadie que lo lea. Queda diferido hasta que una feature
+  pida atribución **por dispositivo** —la disciplina del proyecto es no agregar superficie sin
+  consumidor (misma lección de ADM-01)—.
   El resto del cuerpo: Cada operación lleva su
   `type`, su `clientUuid` y su carga; y su **referencia a lo que depende**: `orderClientUuid`
   (SYN-01) y `shiftClientUuid` (SYN-02). Un cobro depende de las dos, y por eso la dependencia es
@@ -381,8 +396,9 @@ tabla-cola paralela al estado del comprobante es una segunda verdad que se desin
   **Idempotente** (dos corridas seguidas no reenvían lo que no venció). Devuelve un resumen
   `{ pending, attempted, accepted, rejected, exhausted }`. **Implementado en SYN-05** (detalle en
   §6.sexties).
-- **`GET /sync/status?branchId=`** — cuántos comprobantes pendientes, el error más reciente, desde
-  cuándo. Es lo que el POS y la plataforma muestran como "N comprobantes sin rendir".
+- **`GET /sync/status?branchId=`** (permiso `ver_totales`) — cuántos comprobantes pendientes, la
+  emisión del más antiguo (el "desde cuándo"), cuántos agotados, y el error más reciente. Es lo que
+  la plataforma muestra como "N comprobantes sin rendir". **Implementado en SYN-06** (§6.septies).
 
 **Permisos:** `acceso_pos` para empuje y bajada (es el POS operando). `ver_totales` para
 `/sync/status` desde la plataforma de gestión. Ningún permiso nuevo en el vocabulario.
@@ -584,6 +600,24 @@ para cuando el volumen lo pida; el caso de uso no cambia.
   `lastError`. Y `SENDABLE_SUNAT_STATUSES` centralizó "qué está pendiente ante SUNAT" (lo comparten
   el guard y la consulta de la cola).
 
+### 6.septies SYN-06: visibilidad, y el rechazo legible
+
+Cierra el dominio con lo que la plataforma **muestra**, no con lo que hace.
+
+- **`GET /sync/status` no construye datos nuevos.** El caso de uso reusa los **dos puertos que ya
+  existen**: los pendientes salen de `SunatSender.listPending` (derivados del `sunatStatus`, ordenados
+  por emisión, así que el primero es el "desde cuándo") y el error/agotado de
+  `SunatDispatchRepository`. Ningún puerto ni tabla nuevos; solo se enriqueció `listPending` con
+  `issuedAt`. Permiso `ver_totales` (primera ruta del backend que lo estrena): es supervisión, no
+  operación, así que no `acceso_pos`.
+- **El rechazo legible de los dos conflictos ya estaba hecho, y SYN-06 lo prueba en el lote.** Mesa
+  ocupada → `TABLE_NOT_FREE` (pre-check de SAL-08, y el índice único parcial de respaldo); turno
+  duplicado en la misma caja → `SHIFT_ALREADY_OPEN` (SYN-02). El e2e manda **dos dispositivos** (dos
+  `clientUuid`) contra la misma mesa y la misma caja y verifica que el segundo lote vuelva `rejected`
+  con el código —no un 500 ni un `applied` falso—: es lo que la app POS necesita para decirle al
+  cajero *reloteá* o *esa mesa ya está ocupada*. La idempotencia por `clientUuid` no lo enmascara:
+  un `clientUuid` distinto sobre el mismo recurso es un conflicto real, no un reenvío.
+
 ---
 
 ## 7. Costuras dejadas abiertas
@@ -591,6 +625,13 @@ para cuando el volumen lo pida; el caso de uso no cambia.
 - **Worker aparte / temporizador** para la contingencia (§2.2, §6.sexties): SYN-05 dejó solo el
   disparo por `POST /sync/sunat/flush`. Cuando el volumen lo pida, se agrega el disparador
   periódico; el caso de uso no cambia.
+- **Conflicto de mesa en carrera exacta** (SYN-06): el rechazo legible `TABLE_NOT_FREE` lo da el
+  **pre-check** de SAL-08 (la mesa ya está `OCCUPIED` cuando el segundo dispositivo sincroniza), que
+  cubre el caso realista —dos lotes que llegan uno tras otro—. Si dos lotes se solaparan en la
+  ventana exacta, el backstop es el **índice único parcial** `order(table_id) WHERE status='OPEN'`,
+  cuyo `P2002` **no** está mapeado a `TABLE_NOT_FREE` (el `catch` del repo de órdenes solo mapea el
+  `clientUuid` y el correlativo de display), así que reintentaría hasta el tope y podría dar un 500.
+  No cubierto por test; si en producción aparece, mapear ese `P2002` como se hizo con el turno.
 - **Un fallo de infraestructura consume presupuesto de reintento** (SYN-05): el `catch` de la cola
   trata un PSE caído igual que un rechazo de SUNAT —suma un intento con backoff—, así que un corte
   largo del PSE podría agotar el tope de un comprobante que en realidad nunca fue rechazado. Aceptable
@@ -675,7 +716,7 @@ para cuando el volumen lo pida; el caso de uso no cambia.
 | `SYN-03` | `EMIT_COMPROBANTE` / `ISSUE_CREDIT_NOTE` delegando en Facturación: el número del dispositivo se respeta, la marca de agua avanza **solo hacia adelante**, la serie se verifica contra la caja, el reenvío **no consume un número nuevo** (ni el solapado), y el momento del hecho es el de la emisión |
 | `SYN-04` | `GET /sync/working-set`: catálogo de la sucursal, mesas y turno abierto, con `since` |
 | `SYN-05` | **HECHO.** `POST /sync/sunat/flush` reintenta los reenviables vencidos, delegando en Facturación (`SunatSender`); `SunatDispatch` (RLS) guarda intentos/backoff/error, `nextAttemptAt` NULL = agotado; idempotente y aislado por comprobante. Sin worker (solo el disparo del POS) |
-| `SYN-06` | `GET /sync/status` + el rechazo legible de los dos conflictos reales (mesa, turno) |
+| `SYN-06` | **HECHO.** `GET /sync/status` (`ver_totales`) reusando los puertos de la cola (pendientes derivados, más antiguo, agotados, último error), sin tabla ni puerto nuevos; y e2e que prueba el rechazo legible de los dos conflictos en el lote con dos dispositivos (mesa → `TABLE_NOT_FREE`, turno → `SHIFT_ALREADY_OPEN`). Sin `deviceId` (sin consumidor). **Cierra la épica** |
 
 ---
 
