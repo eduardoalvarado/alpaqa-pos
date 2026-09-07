@@ -46,7 +46,9 @@ una mesa, y gestionar mesas está detrás de la feature. Costura menor nombrada 
 ### 3.2 Migración / compatibilidad
 - **Datos reales:** pre-launch, no hay tenants productivos. Cuando los haya, la migración es
   **asignar un plan con `restaurante` a los tenants que hoy usan mesas/cocina** (documentado acá).
-- **Seed:** si el demo usa mesas/cocina, su empresa recibe un plan con `restaurante`.
+- **Seed:** el demo actual es una **tienda** (`controlaInventario:true`, sin mesas/cocina), así que
+  no necesita plan `restaurante` (verificado en RST-02). Si un demo futuro usa mesas/cocina, recibirá
+  el plan.
 - **Fixtures de test:** los e2e que ejercitan mesas/cocina (`table`, `order-table`, `kitchen-ticket`,
   `order` si usa mesero, `sync-conflicts`) deben asignar un plan `restaurante` a su tenant, porque el
   backstop por ruta corta **independientemente de cómo se prendió la capacidad** (esos e2e siembran
@@ -61,8 +63,8 @@ una mesa, y gestionar mesas está detrás de la feature. Costura menor nombrada 
 ## 5. Mapa HU → entregable
 | HU | Entregable |
 |---|---|
-| `RST-01` | Backstop por ruta: `@RequireFeature('restaurante')` en `TableController`, `KitchenTicketController` y la ruta `waiter`. Fix de los fixtures e2e de mesas/cocina (asignar plan `restaurante`). e2e que prueba el corte: sin la feature, `/tables` y `/kitchen-tickets` → 403 |
-| `RST-02` | Migración/seed: el seed demo (si usa mesas/cocina) recibe plan `restaurante`; doc de la migración de datos reales para prod. Sin código de negocio nuevo |
+| `RST-01` | Backstop por ruta: `@RequireFeature('restaurante')` en `TableController`, `KitchenTicketController` y la ruta `waiter`. Fix de los fixtures e2e de mesas/cocina (asignar plan `restaurante`). e2e que prueba el corte: sin la feature, `/tables` y `/kitchen-tickets` → 403. **Hecho 2026-09-07** (`ALPQ-92`): gate a nivel de clase (incluye GETs); helper de test `grantFeatures`; e2e de downgrade (capacidades on + sin plan → 403) mutation-tested. Suites 789 unit + 447 e2e |
+| `RST-02` | Migración/seed. **Hecho 2026-09-07** (`ALPQ-93`): el **seed es una tienda** (`controlaInventario:true`, sin mesas/cocina), así que **no requiere plan `restaurante` ni cambios**. **No hay datos productivos** (pre-launch), así que no hay migración que correr ahora. El **procedimiento** para prod queda documentado (§3.2): asignar un plan con `restaurante` a los tenants que tengan `usaMesas`/`usaCocina` en `true` antes de que el backstop les corte el acceso. Sin código |
 
 ## 6. Costuras
 - **Dine-in por `POST /orders` sin la feature:** la ruta compartida no se gatea; el acceso a mesas
