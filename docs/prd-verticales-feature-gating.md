@@ -79,7 +79,9 @@ Dos capas, **defensa en profundidad** (decisión, ver §8):
 ### 4.1 Gate del **toggle de capacidad** — el candado principal
 El caso de uso que prende capacidades del dueño (`UpdateCompanyCapabilitiesUseCase`, admin) verifica,
 **antes de permitir activar** una capacidad de vertical, que la feature correspondiente esté en el plan
-del tenant. Sin `restaurante` en el plan → `409 FEATURE_NOT_IN_PLAN` al intentar prender `usaMesas`.
+del tenant. Sin `restaurante` en el plan → **`403 CAPABILITY_REQUIRES_FEATURE`** al intentar prender
+`usaMesas` (reconciliado FGT-02: **403**, no 409 —no es conflicto de estado sino falta de
+entitlement—, y código propio del toggle, distinto del `FEATURE_NOT_IN_PLAN` del guard de ruta).
 Esto materializa literalmente "el comercial habilita el operativo": el dueño no puede activar lo que no
 compró. Las capacidades base (`controlaInventario`) pasan sin gate.
 
@@ -120,8 +122,9 @@ caso de uso necesita lógica fina de features.
 
 ## 6. Invariantes
 
-1. **Sin feature en el plan, no hay vertical.** Su capacidad no se puede activar (409 en el toggle) y
-   sus rutas cortan (403). Las capacidades **base** nunca se gatean.
+1. **Sin feature en el plan, no hay vertical.** Su capacidad no se puede activar (**403** en el toggle,
+   `CAPABILITY_REQUIRES_FEATURE`) y sus rutas cortan (**403**, `FEATURE_NOT_IN_PLAN`). Las capacidades
+   **base** nunca se gatean.
 2. **El candado se evalúa por request**, no del token: cambiar/retirar el plan surte efecto en el acto,
    sin re-login (mismo patrón que la suspensión BKO-04).
 3. **Retirar una feature apaga el acceso, no borra los datos.** Un tenant que pierde `restaurante` deja
@@ -165,8 +168,8 @@ caso de uso necesita lógica fina de features.
 
 | HU | Entregable |
 |---|---|
-| `FGT-01` | **Mecanismo de enforcement**: vocabulario `FEATURES` + registro `VERTICALS`; función `tenant_features(company_id)` (`SECURITY DEFINER`, dueño exento); `FeatureReader` (puerto + adapter); decorador `@RequireFeature` + `FeatureGuard` en la cadena (orden fijado por test). **Sin aplicar a ninguna ruta real todavía** (probado con una feature de prueba), para no romper compatibilidad (invariante 5). **Hecho 2026-09-07** (`ALPQ-88`): `FEATURES`/`VERTICALS` en `shared/domain/plan/feature.ts`; `tenant_features` con `search_path public, pg_temp` y agregada a `SecurityDefinerCheck` (el proceso no arranca si falta o su dueño no evade RLS); `FeatureReader` + adapters en `platform/tenancy`; `@RequireFeature` en `shared/infrastructure/http`; `FeatureGuard` entre `TenantStatusGuard` y `PermissionsGuard` con `guard-chain.order.spec` fijando el orden; `FEATURE_NOT_IN_PLAN`→403. **En frío verificado** (mutation-tested: no-op y sin lectura de BD sin `@RequireFeature`). e2e cubre función+reader contra BD real; el corte de ruta end-to-end llega en Fase 2 |
-| `FGT-02` | **Gate del toggle de capacidad** en `UpdateCompanyCapabilitiesUseCase`: prender una capacidad de vertical exige su feature en el plan (409). Con el registro `VERTICALS` (capacidades base pasan) |
+| `FGT-01` | **Mecanismo de enforcement**: vocabulario `FEATURES` + registro `VERTICALS`; función `tenant_features(company_id)` (`SECURITY DEFINER`, dueño exento); `FeatureReader` (puerto + adapter); decorador `@RequireFeature` + `FeatureGuard` en la cadena (orden fijado por test). **Sin aplicar a ninguna ruta real todavía** (probado con una feature de prueba), para no romper compatibilidad (invariante 5) |
+| `FGT-02` | **Gate del toggle de capacidad** en `UpdateCompanyCapabilitiesUseCase`: prender una capacidad de vertical exige su feature en el plan. Con el registro `VERTICALS` (capacidades base pasan). **Hecho 2026-09-07** (`ALPQ-89`): solo al **encender** (false→true) y solo las de vertical; helper `featureForCapability`; lee features vía `FeatureReader` **una sola vez y solo si hace falta** (mutation-tested); error propio `CAPABILITY_REQUIRES_FEATURE`→**403** (distinto del guard de ruta). e2e por la ruta real (sin plan→403, base pasa, con `restaurante`→200). **Nota de compat:** al gatear mesas/cocina, un fixture que las prendía por API sin plan (`company.e2e`) pasó a necesitar un plan `restaurante` — la migración de datos reales es Fase 2 |
 | `FGT-03` | **Gate de superficie**: `GET /auth/me` expone las features efectivas del tenant. Auditoría: las rutas de escritura nuevas se decoran con `@Audit` (una línea) |
 
 > La **aplicación real a restaurante** (`@RequireFeature('restaurante')` en las rutas de mesas/cocina +
