@@ -414,10 +414,14 @@ dominio just-in-time:
 - **Restaurante (vertical)** — **reclasificación**, no reescritura: mesas/comandas/KDS ya existen en
   *Ventas y operación*; este PRD las empaqueta como el vertical vendible `restaurante` y las pone tras
   el candado comercial (incluye la migración de los tenants que hoy las tienen activas).
-- **Óptica (vertical)** — módulo nuevo `optics` sobre el núcleo: receta/graduación como dato de
-  dominio, y **orden de laboratorio** con canal de cumplimiento **interno (cola/ticketera propia) o
-  externo (documento impreso/transmitido que se trackea)** — no es la comanda de cocina, comparte el
-  patrón pero no la naturaleza. Ficha de paciente opcional.
+- **Óptica (vertical)** — módulo nuevo `optics` sobre el núcleo. Alcance: **funcionalmente completa**
+  para que una óptica opere de verdad (directiva del usuario, 2026-09-07), no un mínimo. Incluye:
+  **ficha clínica / historia optométrica** del paciente (SÍ, confirmado), **receta/graduación** como
+  dato de dominio, **orden de laboratorio** con canal de cumplimiento **interno (cola/ticketera
+  propia) o externo (documento impreso/transmitido que se trackea)** —no es la comanda de cocina,
+  comparte el patrón pero no la naturaleza—, dispensación/entrega y control de garantías. Su PRD
+  (just-in-time, Fase 3) se **benchmarkeará contra un suite de gestión óptica de mercado** para no
+  dejar huecos funcionales; recién ahí se fija el detalle de campos y flujos.
 
 > **Alineación §4 ↔ §10 (ago-2026).** Hasta acá el §4 nombraba **Reportes** y **Auditoría** como
 > módulos del MVP, el §10 no los listaba como dominios, y el §9 tampoco los ponía fuera del MVP:
