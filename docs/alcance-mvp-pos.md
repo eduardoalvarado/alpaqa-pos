@@ -279,9 +279,38 @@ No mezclar en un solo sistema de flags. Se modelan por separado desde el inicio.
 - **Capacidades del negocio** (`Empresa.capacidades`) — operativo, editable por el dueño: usa mesas, usa cocina, controla inventario. Define cómo opera, no lo que pagó.
 - **Feature gating por plan** (`Plan.features`) — comercial, editable solo por el operador: qué funciones incluye el plan contratado.
 
-Ejemplo de por qué son ortogonales: un negocio puede tener la capacidad "mesas" activada (es un restaurante) pero estar en un plan que no incluye KDS.
+Ejemplo de por qué son ortogonales: un negocio puede tener la capacidad "mesas" activada (es un restaurante) pero estar en un plan que no incluye KDS. *(Este ejemplo lo matiza la evolución de abajo: bajo el modelo de verticales, mesas y cocina pasan a requerir el vertical `restaurante` en el plan.)*
 
 Para el MVP: capacidades completas (son baratas y necesarias para el modelo unificado); feature gating en su versión más simple (posiblemente un solo plan al inicio, con la estructura lista para agregar más).
+
+> **Evolución — verticales vendibles (2026-09-07).** Decisión de negocio confirmada: además del
+> **núcleo de ventas agnóstico** (la `Order` unificada, que sirve igual a una tienda o un
+> restaurante), el producto **vende verticales** —restaurante, óptica, y las que vengan— como
+> **add-ons comerciales**. Esto **refina** la relación entre los dos ejes: siguen siendo ortogonales
+> en *naturaleza* (operativo vs. comercial), pero para las capacidades que pertenecen a un vertical,
+> el eje **comercial habilita el operativo**.
+>
+> - **Qué es un vertical:** una feature en `Plan.features` (`restaurante`, `optica`, …) **+** su
+>   módulo de dominio **+** sus capacidades/config operativas **+** su superficie. El **núcleo**
+>   (ventas, cobros, facturación, catálogo, inventario, plataforma, sincronización, auditoría,
+>   reportes) queda disponible para **todos** los tenants; el vertical es lo que se compra encima.
+> - **Regla de composición:** el **operador vende** el vertical (lo incluye en el `Plan` del tenant);
+>   recién entonces el **dueño configura** cómo lo usa (prende sus capacidades operativas). Sin la
+>   feature en el plan, las capacidades del vertical **no se pueden activar** y sus rutas no
+>   responden. Comercial arriba (¿lo compró?), operativo adentro (¿cómo lo usa?).
+> - **Capacidades base vs. de vertical:** `controlaInventario` es **base** (todos, sin gate).
+>   `usaMesas`/`usaCocina` **se reclasifican** a config operativa del vertical **`restaurante`** — en
+>   el MVP inicial eran capacidades operativas libres, y esto **supersede** el ejemplo de arriba: sin
+>   `restaurante` en el plan no hay mesas ni cocina. (El núcleo de Ventas —la `Order`— no cambia; lo
+>   que se agrega es el candado comercial sobre esas capas.)
+> - **El feature-gating se construye de verdad** (deja de ser "la versión más simple, un solo plan"):
+>   es el **prerrequisito transversal** de este frente. Lee las features efectivas del tenant (de su
+>   `Plan`) **por request** —mismo patrón que el guard de suspensión, que lee `Empresa.estado` vía
+>   función `SECURITY DEFINER`— y gatea el toggle de capacidad y/o las rutas del vertical. Cierra la
+>   costura que Backoffice (BKO-05) dejó abierta al modelar `Plan.features` sin enforcement. El
+>   detalle técnico (guard de ruta vs. puerto en caso de uso) se fija en su PRD/lineamientos.
+> - **Encuadre de alcance:** este frente es **aditivo y posterior al roadmap del MVP** (que cierra con
+>   Reportes); no bloquea el MVP. Sus dominios llevan **PRD por dominio just-in-time** (§10).
 
 ---
 
@@ -376,6 +405,19 @@ Se agrupan módulos acoplados que se diseñan juntos. Cada PRD de dominio **refe
   escritura de los demás dominios.
 - **Reportes** — los agregados de §4 para el dueño (`ver_totales` ya está en el vocabulario de
   permisos y **todavía no lo usa ninguna ruta**: se reservó para este dominio).
+
+**Frente de verticales vendibles** (post-roadmap-MVP, ver evolución en §7). Cada uno con PRD de
+dominio just-in-time:
+- **Verticales y feature-gating** (transversal, **prerrequisito**) — el mecanismo comercial que
+  habilita/bloquea un vertical según el `Plan` del tenant, leído por request. Define el patrón que
+  siguen **todos** los verticales; construye el enforcement que BKO-05 dejó modelado sin implementar.
+- **Restaurante (vertical)** — **reclasificación**, no reescritura: mesas/comandas/KDS ya existen en
+  *Ventas y operación*; este PRD las empaqueta como el vertical vendible `restaurante` y las pone tras
+  el candado comercial (incluye la migración de los tenants que hoy las tienen activas).
+- **Óptica (vertical)** — módulo nuevo `optics` sobre el núcleo: receta/graduación como dato de
+  dominio, y **orden de laboratorio** con canal de cumplimiento **interno (cola/ticketera propia) o
+  externo (documento impreso/transmitido que se trackea)** — no es la comanda de cocina, comparte el
+  patrón pero no la naturaleza. Ficha de paciente opcional.
 
 > **Alineación §4 ↔ §10 (ago-2026).** Hasta acá el §4 nombraba **Reportes** y **Auditoría** como
 > módulos del MVP, el §10 no los listaba como dominios, y el §9 tampoco los ponía fuera del MVP:
