@@ -123,19 +123,20 @@ Cada ruta lleva su permiso (§8) + `@RequireFeature('optica')` + `@Audit(...)`.
 
 ---
 
-## 9. Decisiones a confirmar (con el usuario, antes de implementar)
-1. **Profesional/optometrista:** ¿es un `User` con permiso, o una entidad propia? (recomiendo `User`
-   con permiso, sin entidad nueva, salvo que la óptica tenga profesionales que no son usuarios del
-   sistema).
-2. **Paciente vs. Customer:** ¿entidad `Patient` separada (recomendado, la ficha clínica no es fiscal)
-   con vínculo opcional al `Customer` al facturar? ¿o extender `Customer`?
-3. **Permisos:** ¿`gestionar_optica`/`ver_receta` nuevos, o reusar los existentes?
-4. **Alcance de la historia clínica:** ¿campos mínimos de examen (agudeza, refracción) o set completo
-   optométrico? (el benchmark sugiere empezar por lo que alimenta la receta).
-5. **Laboratorio en el MVP del vertical:** ¿interno + externo desde el inicio, o externo primero
-   (imprimir/transmitir) e interno después?
-6. **Sincronización offline del vertical:** ¿la óptica opera offline? (recomiendo **no** en el MVP del
-   vertical — la receta/laboratorio son de mostrador con conexión; costura si se necesita).
+## 9. Decisiones confirmadas con el usuario (2026-09-07)
+1. **Profesional/optometrista = `User` con permiso** (sin entidad nueva).
+2. **`Patient` es entidad separada** del `Customer` (fiscal), con **vínculo opcional** al `Customer`
+   al facturar. La ficha clínica cuelga del `Patient`.
+3. **Permisos nuevos** para el vertical (`gestionar_optica`, `ver_receta`) — no se reusan los
+   existentes.
+4. **Historia clínica = set optométrico COMPLETO** (no el mínimo que alimenta la receta). ⇒ `OPT-03`
+   crece: el examen modela el set completo (agudeza, refracción, biomicroscopía, presión, fondo de
+   ojo, antecedentes, etc.), a fijar en su HU con el benchmark.
+5. **Laboratorio: EXTERNO primero** (imprimir/transmitir el documento + seguimiento); el **interno**
+   (cola/ticketera propia) llega después. ⇒ `OPT-05` arranca por el canal externo; el interno es una
+   HU/costura posterior.
+6. **Sin sincronización offline** en el MVP del vertical (receta/laboratorio son de mostrador con
+   conexión). Costura si se necesita.
 
 ---
 
@@ -150,9 +151,9 @@ clínica rica (más allá de lo que alimenta la receta), sincronización offline
 |---|---|
 | `OPT-01` | Cimiento del módulo `optics` + feature `optica` operativa: `Patient` (ficha) + `VERTICALS.optica` + capacidad `usaLaboratorioInterno`; todo detrás de `@RequireFeature('optica')`; RLS+GRANT; auditoría |
 | `OPT-02` | **Receta/graduación** (`Prescription`) ligada al paciente y al profesional |
-| `OPT-03` | **Historia clínica / examen** (`OptometricExam`) del paciente |
+| `OPT-03` | **Historia clínica / examen** (`OptometricExam`) del paciente — **set optométrico completo** (decisión §9.4), campos a fijar con el benchmark |
 | `OPT-04` | **Dispensación**: liga la `Order` a la receta + spec de luna/armazón (reúsa el caso de uso de venta) |
-| `OPT-05` | **Orden de laboratorio** con canal interno/externo + estados + puerto de impresión/transmisión |
+| `OPT-05` | **Orden de laboratorio** — **canal externo primero** (imprimir/transmitir + seguimiento) + estados + puerto de impresión/transmisión. El canal **interno** (cola/ticketera) es HU posterior (decisión §9.5) |
 | `OPT-06` | **Entrega y garantía** |
 
 Orden: OPT-01 (cimiento) → OPT-02/03 (clínico) → OPT-04 (dispensación) → OPT-05 (laboratorio) →
