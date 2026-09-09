@@ -86,6 +86,15 @@ Enganche de auditoría: una línea `@Audit` por ruta (mecanismo ya existente).
   observaciones. Append-only en la práctica (historia). Uno-a-muchos con `Patient`.
 - **`Prescription` (receta/Rx)** — por ojo: `sphere`, `cylinder`, `axis`, `add`, `pd/dip`, `prism`;
   tipo, vigencia, profesional. Cuelga del paciente; opcionalmente del examen que la originó.
+  **Construido (OPT-02):** tipo (`DISTANCE`/`NEAR`/`PROGRESSIVE`/`OCCUPATIONAL`), los dos ojos en
+  **columnas** `od_*`/`os_*` (una receta tiene exactamente dos ojos, siempre: una tabla hija
+  admitiría cero, uno o tres y obligaría a un join para leer lo que nunca se lee por separado),
+  `pupillary_distance` en mm, `issued_at`/`expires_at` como **fechas civiles**, `notes`, y
+  `professional_id` → `usuario` con `RESTRICT` (quien firmó no se borra dejando la receta sin
+  firma). Dioptrías en `Decimal(4,2)`, nunca float. **Es append-only**: se emite y se supersede,
+  nunca se edita — sin `updated_at`, sin rutas de edición/borrado, y `GRANT SELECT, INSERT` con
+  `REVOKE UPDATE, DELETE` explícito. El vínculo al examen **se difiere a OPT-03**, que es cuando
+  la tabla `OptometricExam` existe y la FK puede ser real (§12.5).
 - **`OpticalDispense` (dispensación)** — liga una `Order` (o una `OrderItem`) a una `Prescription`
   + la especificación de la luna (material, tratamientos) + el armazón elegido. Es el puente entre
   lo clínico y la venta.
@@ -122,8 +131,10 @@ nivel dueño), no el candado de venta (ese es la feature `optica`, nivel operado
   entera**). Todas con `@RequireFeature('optica')` a nivel de clase + `gestionar_optica` +
   `@Audit` en las de escritura.
 - Historia: `POST /patients/:id/exams`, `GET /patients/:id/exams`.
-- Recetas: `POST /patients/:id/prescriptions`, `GET /patients/:id/prescriptions`, `GET
-  /prescriptions/:id`.
+- Recetas **(hecho, OPT-02)**: `POST /patients/:patientId/prescriptions` (`gestionar_optica`),
+  `GET /patients/:patientId/prescriptions` (historial, de la más reciente a la más antigua) y
+  `GET /prescriptions/:id`, ambas de lectura con **`ver_receta`**. No hay PATCH ni DELETE: la
+  receta se supersede. El **profesional que firma sale del token**, nunca del cuerpo.
 - Dispensación: `POST /orders/:orderId/optical-dispense` (liga la venta a la receta + spec de luna).
 - Laboratorio: `POST /lab-orders`, `GET /lab-orders` (cola), `PATCH /lab-orders/:id` (avance de
   estado), `POST /lab-orders/:id/print` (documento). Entrega: `POST /lab-orders/:id/deliver`.
@@ -180,8 +191,8 @@ clínica rica (más allá de lo que alimenta la receta), sincronización offline
 | HU | Entregable |
 |---|---|
 | `OPT-01` **(hecha, `ALPQ-95`)** | Cimiento del módulo `optics` + feature `optica` operativa: `Patient` (ficha) + `VERTICALS.optica` + capacidad `usesInternalLab`; todo detrás de `@RequireFeature('optica')`; RLS+GRANT (con `REVOKE DELETE`, §12.1); auditoría |
-| `OPT-02` | **Receta/graduación** (`Prescription`) ligada al paciente y al profesional |
-| `OPT-03` | **Historia clínica / examen** (`OptometricExam`) del paciente — **set optométrico completo** (decisión §9.4), campos a fijar con el benchmark |
+| `OPT-02` **(hecha, `ALPQ-96`)** | **Receta/graduación** (`Prescription`) ligada al paciente y al profesional, con las invariantes clínicas sostenidas por `CHECK` en la base |
+| `OPT-03` | **Historia clínica / examen** (`OptometricExam`) del paciente — **set optométrico completo** (decisión §9.4), campos a fijar con el benchmark. **Incluye agregar `prescription.exam_id` con su FK compuesta por tenant** (diferido de OPT-02, §13.7) |
 | `OPT-04` | **Dispensación**: liga la `Order` a la receta + spec de luna/armazón (reúsa el caso de uso de venta) |
 | `OPT-05` | **Orden de laboratorio** — **canal externo primero** (imprimir/transmitir + seguimiento) + estados + puerto de impresión/transmisión. El canal **interno** (cola/ticketera) es HU posterior (decisión §9.5) |
 | `OPT-06` | **Entrega y garantía** |
@@ -239,5 +250,101 @@ cerraron antes del commit:
   lo declara, que es lo que obliga al doble en memoria a comportarse igual.
 
 ### 12.4 Alcance de `ver_receta`
-El permiso entra al vocabulario en OPT-01 —el dueño necesita verlo para armar sus roles— pero
-todavía no gatea ninguna ruta: la lectura clínica que gobierna nace en OPT-02.
+El permiso entró al vocabulario en OPT-01 —el dueño necesita verlo para armar sus roles— y
+**empieza a gatear en OPT-02**: emitir es `gestionar_optica` (acto clínico, alguien firma una
+graduación) y **leer** es `ver_receta`. La separación existe para que quien despacha —el
+mostrador que arma el pedido y elige el armazón— consulte la receta sin poder emitir ni tocar la
+historia; sin ella, dispensar exigiría dar permiso de escritura clínica a media tienda.
+
+---
+
+## 13. Decisiones y desviaciones de OPT-02 (receta)
+
+### 13.1 Las invariantes clínicas viven en el dominio **y** en la base
+El dominio valida con errores legibles (paso de fabricación de 0.25 dioptrías, rango clínico,
+cilindro↔eje, prisma↔base, adición↔tipo, vigencia posterior a emisión). Además, las que se pueden
+expresar en SQL van como `CHECK`: son el techo que queda puesto cuando mañana alguien escriba por
+otro camino. Las dos capas se probaron por separado —el dominio con unit tests, los `CHECK`
+insertando con el owner para saltear la aplicación— y **cada una se verificó por mutación**.
+
+Por qué estas reglas y no otras: una graduación fuera del paso de 0.25 **no se puede tallar**, así
+que dejarla entrar convierte un error de tipeo del mostrador en un pedido rechazado por el
+laboratorio días después. Un cilindro sin eje es lo mismo: el cilindro dice *cuánto* astigmatismo
+hay, el eje *en qué orientación*, y sin las dos cosas no hay lente. El eje se acota a 0–180 porque
+una elipse a 190° es la misma que a 10°: aceptar 190 guarda un dato que después nadie sabe si
+estaba mal escrito.
+
+**Los números** (fijados acá porque rechazan peticiones con 422, así que no pueden vivir solo
+como constantes en el código): paso **0.25 D** para esfera, cilindro, adición y prisma; esfera
+**±30**, cilindro **±15**, adición **0.25 a 6**, prisma **0 a 20**; distancia interpupilar **40 a
+85 mm** en pasos de **0.5**; eje **entero de 0 a 180**; notas hasta 500 caracteres. Los rangos son
+generosos a propósito: no pretenden ser el criterio clínico del profesional, sino atajar el tipeo
+(el récord de miopía documentado ronda −28 D).
+
+### 13.2 La adición ata el tipo con los ojos
+`DISTANCE` **rechaza** adición (con adición sería de cerca o progresiva); `PROGRESSIVE` y
+`OCCUPATIONAL` la **exigen** (se definen por ella); `NEAR` la deja opcional a propósito, porque una
+receta de cerca se escribe tanto como potencia absoluta —sin adición— como derivada de la de lejos,
+y las dos formas se usan.
+
+### 13.3 El rastro de auditoría no es una puerta de atrás a lo clínico
+AUD-07 devuelve `dataAfter` y `metadata.payload` a quien tenga `ver_auditoria`. Sin redactar, ese
+permiso leería esfera, cilindro, eje, adición, DIP y notas de cada receta emitida, **sorteando el
+`ver_receta`** que esta misma HU introduce. Por eso la emisión declara `redactBody`/`redactResponse`
+sobre los campos clínicos: el rastro responde *quién emitió qué receta y cuándo* —le basta el
+`entityId`— y los valores se leen de la receta, que exige el permiso. Como la receta es inmutable,
+el rastro no pierde nada.
+
+**Asimetría deliberada con OPT-01:** la ficha del paciente **no** se redacta. Ahí el rastro sirve
+para saber *qué cambió* en un dato que sí se edita, y ese es justamente su valor; en la receta, que
+no se edita nunca, el documento entero sigue disponible para quien tenga `ver_receta`.
+
+### 13.4 La firma sale del token, no del cuerpo
+Dejar que la request diga quién firmó permitiría emitir una receta a nombre de otro profesional,
+que es justo la accountability que el vertical necesita conservar (§9.1). La garantía es de dos
+capas: el DTO no declara el campo (y `whitelist: true` lo descarta) y el controller pasa el usuario
+autenticado sin mirar el cuerpo.
+
+### 13.5 Una receta no se edita
+Se emite y se supersede; corregirla es emitir otra, que es lo que deja el rastro clínico honesto.
+Lo dicen el puerto (no ofrece `update`), el módulo (no expone ruta) y —lo único que lo garantiza—
+el privilegio: `REVOKE UPDATE, DELETE`, por la lección de §12.1.
+
+### 13.6 Qué queda fuera: DIP monocular
+La distancia interpupilar se guarda **binocular** (una sola medida). El estándar para progresivos
+es la **monocular** (una por ojo, porque la nariz rara vez está centrada). Es una costura conocida,
+no un olvido: se agrega cuando OPT-04/05 lo pidan, y son dos columnas más.
+
+### 13.7 El vínculo receta↔examen se difiere a OPT-03
+La HU lo mencionaba como columna nullable "hasta OPT-03". Se difirió: una columna que referencia
+una tabla que todavía no existe no puede tener FK, no la puede poblar nadie, y hay que acordarse de
+cerrarla después. OPT-03 la agrega **con** su FK, cuando `OptometricExam` exista.
+
+### 13.8 FK compuesta por tenant (nueva regla del vertical)
+La RLS de una tabla verifica **de quién es la fila**, no **a qué apunta**, y las FK de Postgres no
+aplican RLS. Con una FK simple `patient_id`, nada en la base impedía una receta con `company_id`
+mío y `patient_id` de otro tenant: lo atajaba el caso de uso, o sea **una sola capa**, cuando los
+lineamientos §2.4 piden dos. `prescription` estrena por eso la **primera FK compuesta del repo**,
+`(company_id, patient_id) → patient(company_id, id)`, con el único que Postgres exige como destino.
+
+**Es molde para OPT-03..06**: todos cuelgan del mismo paciente, y con la FK simple cada agregado
+nuevo repetiría el chequeo por convención hasta que uno se olvide y la base no avise.
+
+### 13.9 Lo que las auditorías corrigieron
+Ambas dieron **fiel** y **sana**; las reservas se cerraron antes del commit:
+- **El paso de 0.25 no estaba en la base**, pese a que este PRD lo ponía de bandera. Ahora es un
+  `CHECK` (`x*4 = trunc(x*4)` sobre columnas `DECIMAL`: exacto, sin aritmética flotante).
+- **Tres decoradores sin cobertura:** `@RequireFeature('optica')` y `@Audit` se podían borrar con la
+  suite en verde. Ahora tienen e2e que muerden.
+- **La FK del profesional decía `RESTRICT` en el comentario y quedaba en `NO ACTION`** (el default
+  de Postgres no es `RESTRICT`), con drift contra `schema.prisma`. Escrita explícita; `migrate diff`
+  vuelve limpio.
+- **El contrato mentía:** el OpenAPI declaraba los ojos obligatorios y `@ValidateNested` no valida
+  lo ausente. Se agregó `@IsDefined`/`@IsObject`.
+- **`isExpired` se quitó**: era código de OPT-04. La semántica que fijaba —una receta vence **al día
+  siguiente** de su vigencia, y sin `expiresAt` no vence nunca— queda registrada acá para que OPT-04
+  la implemente deliberadamente.
+- **Un comentario afirmaba de más:** decía que `entityIdFromResponse` evitaba etiquetar el evento
+  con el id del paciente. Es falso —el param se llama `:patientId`, no `:id`, así que el interceptor
+  ya cae al `id` de la respuesta—; se verificó por mutación y el comentario ahora dice lo que es:
+  intención explícita, no mecanismo necesario.
