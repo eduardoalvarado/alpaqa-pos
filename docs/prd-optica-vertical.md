@@ -84,6 +84,13 @@ Enganche de auditoría: una línea `@Audit` por ruta (mecanismo ya existente).
   vocabulario **en la base** — sin él, "sin RUC" sería una promesa del repositorio (§12.1).
 - **`ClinicalRecord` / `OptometricExam`** — visita: fecha, profesional, agudeza visual, refracción,
   observaciones. Append-only en la práctica (historia). Uno-a-muchos con `Patient`.
+  **Construido (OPT-03), set completo:** anamnesis (motivo de consulta, antecedentes personales/
+  familiares/oculares, medicación); **agudeza visual** de lejos y de cerca, sin y con corrección,
+  por ojo y binocular, más estenopeico monocular; **refracción** objetiva (retinoscopía/autoref) y
+  subjetiva (foróptero, con adición); **queratometría** (dos meridianos con su eje por ojo);
+  **tonometría** (las dos presiones y el método); **hallazgos** (biomicroscopía y fondo de ojo por
+  ojo, motilidad, cover test, visión de color, estereopsis); **conclusión** (diagnóstico, plan,
+  observaciones). Append-only de verdad: `GRANT SELECT, INSERT` + `REVOKE UPDATE, DELETE`.
 - **`Prescription` (receta/Rx)** — por ojo: `sphere`, `cylinder`, `axis`, `add`, `pd/dip`, `prism`;
   tipo, vigencia, profesional. Cuelga del paciente; opcionalmente del examen que la originó.
   **Construido (OPT-02):** tipo (`DISTANCE`/`NEAR`/`PROGRESSIVE`/`OCCUPATIONAL`), los dos ojos en
@@ -130,7 +137,10 @@ nivel dueño), no el candado de venta (ese es la feature `optica`, nivel operado
   (parche parcial: ausente conserva, `null` explícito borra, y la ficha se **re-valida
   entera**). Todas con `@RequireFeature('optica')` a nivel de clase + `gestionar_optica` +
   `@Audit` en las de escritura.
-- Historia: `POST /patients/:id/exams`, `GET /patients/:id/exams`.
+- Historia **(hecho, OPT-03)**: `POST /patients/:patientId/exams` (`gestionar_optica`),
+  `GET /patients/:patientId/exams` (la historia, de la visita más reciente a la más antigua) y
+  `GET /exams/:id`, ambas de lectura con **`ver_receta`** — mismo trío que las recetas. No hay
+  PATCH ni DELETE: la historia clínica no se reescribe, una corrección es una visita nueva.
 - Recetas **(hecho, OPT-02)**: `POST /patients/:patientId/prescriptions` (`gestionar_optica`),
   `GET /patients/:patientId/prescriptions` (historial, de la más reciente a la más antigua) y
   `GET /prescriptions/:id`, ambas de lectura con **`ver_receta`**. No hay PATCH ni DELETE: la
@@ -192,7 +202,7 @@ clínica rica (más allá de lo que alimenta la receta), sincronización offline
 |---|---|
 | `OPT-01` **(hecha, `ALPQ-95`)** | Cimiento del módulo `optics` + feature `optica` operativa: `Patient` (ficha) + `VERTICALS.optica` + capacidad `usesInternalLab`; todo detrás de `@RequireFeature('optica')`; RLS+GRANT (con `REVOKE DELETE`, §12.1); auditoría |
 | `OPT-02` **(hecha, `ALPQ-96`)** | **Receta/graduación** (`Prescription`) ligada al paciente y al profesional, con las invariantes clínicas sostenidas por `CHECK` en la base |
-| `OPT-03` | **Historia clínica / examen** (`OptometricExam`) del paciente — **set optométrico completo** (decisión §9.4), campos a fijar con el benchmark. **Incluye agregar `prescription.exam_id` con su FK compuesta por tenant** (diferido de OPT-02, §13.7) |
+| `OPT-03` **(hecha, `ALPQ-97`)** | **Historia clínica / examen** (`OptometricExam`) — set optométrico completo (§9.4, detallado en §4 y §14). Cierra `prescription.exam_id` con su FK compuesta (diferido de OPT-02, §13.7) |
 | `OPT-04` | **Dispensación**: liga la `Order` a la receta + spec de luna/armazón (reúsa el caso de uso de venta) |
 | `OPT-05` | **Orden de laboratorio** — **canal externo primero** (imprimir/transmitir + seguimiento) + estados + puerto de impresión/transmisión. El canal **interno** (cola/ticketera) es HU posterior (decisión §9.5) |
 | `OPT-06` | **Entrega y garantía** |
@@ -348,3 +358,60 @@ Ambas dieron **fiel** y **sana**; las reservas se cerraron antes del commit:
   con el id del paciente. Es falso —el param se llama `:patientId`, no `:id`, así que el interceptor
   ya cae al `id` de la respuesta—; se verificó por mutación y el comentario ahora dice lo que es:
   intención explícita, no mecanismo necesario.
+
+---
+
+## 14. Decisiones y desviaciones de OPT-03 (historia clínica)
+
+### 14.1 "No se midió" y "no tiene graduación" son datos distintos
+La decisión más importante de la HU, y la que una auditoría hizo corregir antes del commit.
+
+El examen empezó reusando la `Refraction` de la receta, que resuelve un ojo sin datos como
+**plano** (`0/0`). En una **receta** eso es correcto: una receta siempre prescribe algo, y "plano"
+es una prescripción real. En un **examen** es falso: si nadie refractó ese ojo, guardarlo como
+`0/0` lo registra como **emétrope**, que es un hallazgo positivo — y sobre una tabla append-only
+ese dato no se corrige nunca. Encima dejaba muerta la nulabilidad de ocho columnas y hacía
+inalcanzable una rama de su `CHECK`.
+
+Se introdujo **`MeasuredRefraction`**, donde `null` es "no se midió" y `0` es "no tiene
+graduación". Es la misma semántica que el examen ya usaba en todo lo demás (queratometría,
+presión, agudezas); la refracción era la única excepción, y por herencia, no por decisión.
+
+**Regla general que deja para OPT-04..06:** un value object que viaja entre dos contextos con
+semánticas distintas de la ausencia **no se reusa tal cual**. Se comparte la validación (el paso
+de 0.25, los rangos, cilindro↔eje viven en `diopters.ts` una sola vez); se separa el default.
+
+### 14.2 Tabla ancha, no JSONB ni tablas hijas
+~50 columnas casi todas nullable. Los campos pertenecen todos al mismo hecho clínico, se leen
+juntos y se consultan por separado ("¿cómo evolucionó la presión de este paciente?"). Un `JSONB`
+haría la historia inconsultable y no validable —lo contrario de lo que un registro clínico
+necesita— y una tabla hija por sección obligaría a un join por bloque para reconstruir una sola
+visita. Los value objects (`AcuitySet`, `Keratometry`, `Tonometry`, `MeasuredRefraction`) están
+donde hay una **regla cruzada**, no donde hay campos parecidos: agrupar sin invariante es
+ceremonia.
+
+### 14.3 La agudeza visual es texto validado, no un número
+Se aceptan Snellen (`20/40`, `6/12`), decimal (`0.5`) y la escala de baja visión
+(`CD`/`MM`/`PL`/`NPL`), y se guarda **la notación tal como se midió**. Por debajo de Snellen la
+agudeza deja de ser una fracción: no hay número que exprese "distingue el movimiento de una mano",
+guardar eso como `0` sería falso, y `NPL` es un hallazgo grave que hay que poder leer tal cual.
+Convertir a decimal perdería la distancia de examen, y volver atrás inventaría precisión.
+
+### 14.4 Todo lo clínico es opcional
+Una visita de control mide agudeza y refracción; una primera consulta agrega fondo de ojo y
+presión. Obligar a llenar campos haría que el mostrador **invente valores**, que es exactamente lo
+que arruina una historia clínica. Lo único obligatorio es de quién es la visita, quién la hizo y
+cuándo.
+
+### 14.5 La historia clínica se redacta entera del rastro
+Extiende §13.3: el rastro conserva quién registró qué visita y cuándo, y el contenido se lee del
+examen, que exige `ver_receta`. Acá pesa más que en la receta —hay diagnóstico, antecedentes y
+medicación—, así que se redacta la carga completa. Y a diferencia de OPT-02, la lista de campos a
+redactar tiene **mecanismo**: un test la contrasta contra la forma real de la respuesta, de modo
+que agregar un campo clínico y olvidarse de redactarlo se pone rojo.
+
+### 14.6 El examen citado por una receta debe ser del mismo paciente
+Regla nueva, descubierta al cerrar el vínculo de §13.7: **ni la FK compuesta ni la RLS la cubren**,
+porque las dos verifican la **empresa**, no de quién es la visita. Una receta que cita la historia
+de otro paciente pasaría ambas y sería un error clínico grave y silencioso. La valida el caso de
+uso, con su propio error (`EXAM_PATIENT_MISMATCH` → 422).
