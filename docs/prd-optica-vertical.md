@@ -203,12 +203,14 @@ clínica rica (más allá de lo que alimenta la receta), sincronización offline
 | `OPT-01` **(hecha, `ALPQ-95`)** | Cimiento del módulo `optics` + feature `optica` operativa: `Patient` (ficha) + `VERTICALS.optica` + capacidad `usesInternalLab`; todo detrás de `@RequireFeature('optica')`; RLS+GRANT (con `REVOKE DELETE`, §12.1); auditoría |
 | `OPT-02` **(hecha, `ALPQ-96`)** | **Receta/graduación** (`Prescription`) ligada al paciente y al profesional, con las invariantes clínicas sostenidas por `CHECK` en la base |
 | `OPT-03` **(hecha, `ALPQ-97`)** | **Historia clínica / examen** (`OptometricExam`) — set optométrico completo (§9.4, detallado en §4 y §14). Cierra `prescription.exam_id` con su FK compuesta (diferido de OPT-02, §13.7) |
-| `OPT-04` | **Dispensación**: liga la `Order` a la receta + spec de luna/armazón (reúsa el caso de uso de venta) |
-| `OPT-05` | **Orden de laboratorio** — **canal externo primero** (imprimir/transmitir + seguimiento) + estados + puerto de impresión/transmisión. El canal **interno** (cola/ticketera) es HU posterior (decisión §9.5) |
-| `OPT-06` | **Entrega y garantía** |
+| `OPT-04` **(hecha, `ALPQ-101`)** | **Catálogo de especificaciones de luna**: los cinco ejes con los que se le dice al laboratorio qué tallar, precargados y administrables por cada óptica (§15) |
+| `OPT-05` | **Dispensación**: liga la `Order` a la receta + spec de luna/armazón + **medidas de montaje** (reúsa el caso de uso de venta) |
+| `OPT-06` | **Orden de laboratorio** — **canal externo primero** (imprimir/transmitir + seguimiento) + estados + puerto de impresión/transmisión. El canal **interno** (cola/ticketera) es HU posterior (decisión §9.5) |
+| `OPT-07` | **Entrega y garantía** |
 
-Orden: OPT-01 (cimiento) → OPT-02/03 (clínico) → OPT-04 (dispensación) → OPT-05 (laboratorio) →
-OPT-06 (entrega). Frontend (pantallas de óptica) es trabajo aparte del backend.
+Orden: OPT-01 (cimiento) → OPT-02/03 (clínico) → **OPT-04 (catálogo de lunas)** → OPT-05
+(dispensación) → OPT-06 (laboratorio) → OPT-07 (entrega). El catálogo se insertó antes de la
+dispensación porque es su insumo: no se puede describir qué tallar sin el vocabulario (§15). Frontend (pantallas de óptica) es trabajo aparte del backend.
 
 ---
 
@@ -353,7 +355,7 @@ Ambas dieron **fiel** y **sana**; las reservas se cerraron antes del commit:
   lo ausente. Se agregó `@IsDefined`/`@IsObject`.
 - **`isExpired` se quitó**: era código de OPT-04. La semántica que fijaba —una receta vence **al día
   siguiente** de su vigencia, y sin `expiresAt` no vence nunca— queda registrada acá para que OPT-04
-  la implemente deliberadamente.
+  la implemente deliberadamente (**OPT-05**, tras la renumeración de §11).
 - **Un comentario afirmaba de más:** decía que `entityIdFromResponse` evitaba etiquetar el evento
   con el id del paciente. Es falso —el param se llama `:patientId`, no `:id`, así que el interceptor
   ya cae al `id` de la respuesta—; se verificó por mutación y el comentario ahora dice lo que es:
@@ -415,3 +417,95 @@ Regla nueva, descubierta al cerrar el vínculo de §13.7: **ni la FK compuesta n
 porque las dos verifican la **empresa**, no de quién es la visita. Una receta que cita la historia
 de otro paciente pasaría ambas y sería un error clínico grave y silencioso. La valida el caso de
 uso, con su propio error (`EXAM_PATIENT_MISMATCH` → 422).
+
+---
+
+## 15. Catálogo de especificaciones de luna (OPT-04)
+
+**HU insertada en el plan** (2026-09-09) a pedido del usuario. La spec de luna iba a ser un par
+de campos dentro de la dispensación; el cliente real —una óptica que trabaja con la marca Smart
+Pacific— se detiene largo en este punto del proceso, analizando las características para ofrecer
+la más específica al paciente. Un par de campos de texto no sostiene eso.
+
+### 15.1 Para qué existe: emitir la orden de trabajo
+El encuadre que le da forma a todo lo demás: **este catálogo no es una taxonomía para clasificar
+productos, es el vocabulario con el que la óptica le dice al laboratorio qué producir** (OPT-06).
+De ahí salen tres consecuencias:
+
+- **No lleva precio.** El armazón y la luna son **productos separados del catálogo normal**, cada
+  uno con su precio, IGV e inventario. Esto es la **ficha técnica**; duplicar el precio acá
+  crearía dos verdades sobre cuánto cuesta.
+- **No se modela un "producto de luna" con presets.** Si el objetivo es llenar la orden, el óptico
+  especifica los ejes; el preset sobraba (ver §15.4).
+- **Vuelve una costura de OPT-02:** una orden producible necesita **DIP monocular y altura de
+  montaje** —sin la altura, un progresivo se talla mal—. No son datos de la receta sino **de ese
+  par de anteojos**, así que van en la dispensación (OPT-05).
+
+### 15.2 Cinco ejes, y por qué el filtro no es un tratamiento
+`MATERIAL`, `DESIGN`, `FILTER`, `TREATMENT`, `BRAND`, en **una tabla con discriminador**: los
+cinco comparten forma y ABM, y cinco tablas serían cinco CRUD idénticos.
+
+La separación entre filtro y tratamiento tiene un criterio físico, no cosmético: un **tratamiento**
+es una capa que el laboratorio aplica (un paso de proceso, con su costo); un **filtro** es una
+propiedad del cuerpo de la luna o del material. El pago es concreto: **el policarbonato y el Trivex
+ya bloquean UV400 de fábrica**, y con el filtro mezclado entre los tratamientos el mostrador se lo
+cobra al paciente como extra sobre una luna que ya lo traía.
+
+**Un material lleva siempre su índice de refracción, y nada más lo lleva** — invariante en las dos
+direcciones, en el dominio y en un `CHECK`. Es lo que decide el grosor para una graduación dada: un
+`MATERIAL` sin él deja a quien dispensa eligiendo a ciegas y a la orden sin el dato para cotizar.
+
+### 15.3 Las precargadas llegan por importación, no por siembra
+La feature `optica` se puede comprar mucho después de crear el negocio, así que sembrar en el alta
+le metería el catálogo de óptica a una bodega —y acoplaría `admin` con `optics` sin necesidad—. Una
+ruta explícita e **idempotente** hace que el catálogo llegue cuando la óptica lo pide, y el mismo
+mecanismo sirve mañana para traer novedades. Reimportar **no pisa** lo que la óptica renombró o dio
+de baja: si recreara las precargadas, el negocio perdería en silencio su adaptación.
+
+**Copia por tenant**, no filas globales compartidas: es lo consistente con el resto del backend
+(toda tabla de negocio lleva `company_id` y RLS) y le da a cada óptica control total sobre su lista.
+El costo aceptado: ampliar la lista base no alcanza sola a los tenants viejos — lo resuelve
+reimportar.
+
+### 15.4 Lo que deliberadamente NO está
+- **Rangos de graduación con nombre comercial** (las "series" tipo Serie 1 / Serie 2). Se
+  investigó: **no son un estándar del rubro** sino la nomenclatura comercial de cada laboratorio —
+  Smart Pacific no tiene catálogo público que verificar—. Hardcodearlas metería el catálogo de un
+  proveedor dentro del producto, y la próxima óptica se encontraría con series que no existen para
+  ella. Lo universal es el **rango de fabricación** (fuera de él la luna deja de ser terminada y
+  pasa a tallarse), y si algún día se modela, va como dato del tenant.
+- **Los parámetros de un pedido**: color y porcentaje de un tinte, color del fotocromático,
+  categoría solar 0-4. Eso no es *qué ofrece la óptica* sino *qué se pidió para este paciente*, y
+  pertenece a la dispensación y a la orden (OPT-05/06). Si entraran acá, cada uno arrastraría su
+  columna nullable y su rama de validación a una tabla que describe un vocabulario.
+- **Precio**, por §15.1.
+
+### 15.5 Se edita, pero no se borra
+Asimetría deliberada con la receta y el examen, que son append-only: el catálogo **sí** se adapta
+—una óptica renombra su marca, corrige una descripción— pero dar de baja es **desactivar**. Las
+dispensaciones y órdenes ya emitidas lo referencian, y la historia no puede quedar apuntando a la
+nada. En la base: `GRANT SELECT, INSERT, UPDATE` + `REVOKE DELETE`. El **código y el eje son
+inmutables**: son la clave con la que una dispensación referencia la opción, y cambiarlos
+reescribiría en silencio lo que se le pidió al laboratorio en trabajos ya emitidos.
+
+### 15.6 Trampa registrada para cuando se cruce receta ↔ catálogo
+Los laboratorios trabajan en **cilindro negativo**, pero una receta puede venir escrita en cilindro
+positivo (OPT-02 lo acepta a propósito: registra lo que el médico escribió). Si alguna vez se
+valida "¿esta graduación entra en este producto?", hay que **transponer primero**
+(`esf+cil`, `−cil`, `eje±90`) o el sistema dirá que no hay luna disponible para una receta
+perfectamente normal. Es un error silencioso y caro.
+
+### 15.7 Lo que las auditorías corrigieron
+Ambas dieron **sana** y **fiel**; las reservas se cerraron antes del commit:
+- **Media invariante**: el `CHECK` imponía "índice ⇒ material" pero no "material ⇒ índice", así que
+  un `MATERIAL` sin índice era representable por la ruta pública, justo donde el diseño dice que
+  ese dato decide. Ahora es bidireccional, en dominio y en base.
+- **Los tres `@Audit` no tenían cobertura** — la misma lección que OPT-03 había dejado escrita y que
+  acá no se aplicó. Se podían borrar con la suite en verde; ahora hay e2e que muerde.
+- **`SUN_CAT` salió del catálogo**: una escala 0-4 es un parámetro del pedido, no un valor del
+  vocabulario (§15.4). Lo señaló el auditor de plan y es la frontera correcta.
+- **El permiso de lectura** quedó explícito: hoy `gestionar_optica`, y si en OPT-05 el mostrador
+  dispensa sin administrar el catálogo, corresponde un permiso de lectura aparte en vez de
+  ensanchar `gestionar_optica`.
+- Menores: la lista precargada dejó de tiparse con el tipo laxo del borde, el doble en memoria ganó
+  el test que muerde su réplica del índice único, y el `update` del adapter perdió un viaje a la BD.
